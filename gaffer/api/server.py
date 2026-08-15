@@ -1581,7 +1581,23 @@ def create_app(config: Optional[Config] = None, horizon: Optional[int] = None) -
     def index() -> Any:
         path = os.path.join(WEB_DIR, "index.html")
         if os.path.exists(path):
-            return FileResponse(path)
+            # Stamp each asset with the mtime of the file itself, so editing a
+            # script changes its URL and the browser is forced to refetch it.
+            # Without this an ETag change alone is not enough: the browser
+            # serves the cached copy from memory and the user sees a dashboard
+            # that silently lags the code by a release.
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    html = fh.read()
+                for asset in ("styles.css", "sample.js", "ui.js", "views.js", "app.js"):
+                    asset_path = os.path.join(WEB_DIR, asset)
+                    if not os.path.exists(asset_path):
+                        continue
+                    stamp = int(os.path.getmtime(asset_path))
+                    html = html.replace('"%s"' % asset, '"%s?v=%d"' % (asset, stamp))
+                return HTMLResponse(html, status_code=200)
+            except OSError:
+                return FileResponse(path)
         return HTMLResponse(
             "<html><head><title>gaffer</title></head><body "
             "style='font:14px ui-monospace,monospace;background:#111;color:#ddd;padding:2rem'>"

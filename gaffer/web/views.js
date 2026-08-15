@@ -675,10 +675,31 @@
         : (isNum(d.expected_points) ? d.expected_points - 4 * (d.hits || 0) : 0);
     });
 
+    // With no team linked there is nothing to transfer FROM, so the backend
+    // returns the initial-squad pick instead of a plan. It is still solved over
+    // the full horizon, so report that horizon rather than the single decision
+    // it came back with — otherwise the tile reads "GW1–1" and looks broken.
+    var initial = plan.mode === 'initial_squad';
+    var planGws = plan.gws || [];
+    var lastGw = initial && planGws.length ? planGws[planGws.length - 1]
+      : (decisions.length ? decisions[decisions.length - 1].gw : '?');
+    var spanGws = initial && planGws.length ? planGws.length : decisions.length;
+
+    if (initial) {
+      body.appendChild(el('div', { class: 'view-note', style: 'margin-bottom:10px' }, [
+        el('span', { html:
+          '<b>No team linked</b>, so there are no transfers to plan. This is the best opening 15, ' +
+          'chosen over GW' + (plan.first_gw || 1) + '–' + lastGw + '. ' +
+          'To plan transfers, set your FPL entry id in <code>config.json</code> ' +
+          '(<code>{"entry_id": 1234567}</code>) and reload — you can find it in the URL of your ' +
+          'points page on the FPL site.' })
+      ]));
+    }
+
     body.appendChild(el('div', { class: 'stats' }, [
-      U.statTile('Horizon', 'GW' + (plan.first_gw || decisions[0].gw) + '–' +
-        (decisions.length ? decisions[decisions.length - 1].gw : '?'),
-        decisions.length + ' gameweeks'),
+      U.statTile('Horizon', 'GW' + (plan.first_gw || decisions[0].gw) + '–' + lastGw,
+        spanGws + ' gameweek' + (spanGws === 1 ? '' : 's') +
+        (initial ? ' · opening squad' : '')),
       U.statTile('Projected net', U.num(totalNet, 1), 'after hit costs', 'hero'),
       U.statTile('Transfers', String(nTransfers), nHits ? nHits + ' hit(s) = ' + (-4 * nHits) + ' pts' : 'no hits'),
       U.statTile('Chips', decisions.filter(function (d) { return d.chip; })
