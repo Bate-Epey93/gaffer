@@ -375,6 +375,54 @@ attempt backs off 15m → 30m → 1h → 2h → 4h → 6h rather than hammering 
 
 ---
 
+## Putting it on your phone (free)
+
+The dashboard can be frozen into flat files and published to GitHub Pages, which
+costs nothing and opens instantly. A hosted server on a free tier sleeps when idle,
+and waking gaffer means refetching 587 player summaries and refitting six models —
+30-90 seconds of spinner at the exact moment you're checking a deadline. A frozen
+snapshot has no such problem, because all the work already happened.
+
+```bash
+gaffer export --out site          # ~27s: computes everything, writes 609 files
+python3 -m http.server -d site 8000   # check it locally first
+```
+
+**What you give up.** Re-optimising against constraints you change on the phone
+(a different budget, a locked player, a longer horizon) needs a solver, and a
+solver needs a server. The snapshot ships the default solve only; ask it for a
+different one and it says so rather than quietly answering a different question.
+Everything else — projections, the squad, captaincy, chips, per-player audits —
+is fully present. The header reads `SNAPSHOT · 3 hours ago`, never `LIVE`.
+
+### Publishing it
+
+1. Push this repo to GitHub.
+2. **Settings → Pages → Source: GitHub Actions.**
+3. That's it. [`.github/workflows/publish.yml`](.github/workflows/publish.yml) builds
+   every 6 hours and on every push to `main`.
+
+Before a deadline, once the team news has landed, trigger a fresh build by hand:
+**Actions → publish → Run workflow**. A scheduled build cannot know about a press
+conference that happened twenty minutes ago.
+
+The schedule is every 6 hours because a **private** repo gets 2,000 free Actions
+minutes a month and each run costs 3-4; that's ~480 minutes. Public repos get
+unlimited minutes, so you can run it hourly if you make the repo public.
+
+**Your published site is readable by anyone with the URL** — GitHub Pages on a free
+account is public even when the repo is private. The data is public FPL data, but
+your squad and transfer plan are visible too. If that matters, run it locally or over
+Tailscale instead.
+
+### The other options
+
+`render.yaml` is a working Render blueprint if you ever want a live, always-on
+server with the full interactive solver. It needs a paid instance to be pleasant:
+the free tier spins down and cannot mount the disk that keeps the cache warm.
+The server is password-protected whenever it is reachable from anywhere but
+loopback — see **Configuration** for `GAFFER_PASSWORD`.
+
 ## Running it unattended (macOS)
 
 Two launchd LaunchAgents: the server starts at login and is restarted if it dies, and
