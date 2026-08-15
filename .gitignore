@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 data/cache/
 data/raw/
+# autorefresh bookkeeping: this machine's lock and failure streak, not the code
+data/autorefresh.json
+data/autorefresh.lock
 .claude/
 reports/*.json
 .DS_Store

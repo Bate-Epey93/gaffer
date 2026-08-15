@@ -63,6 +63,9 @@
   var store = {
     mode: 'loading',          // loading | live | sample
     sampleReason: '',
+    // Set when the service worker answered an /api call out of its cache
+    // because the backend was unreachable. { at: ISO string, calls: n }.
+    stale: null,
     origin: location.origin,
     state: null,
     teams: {},
@@ -113,6 +116,23 @@
     return TIMEOUT_DEFAULT_MS;
   }
 
+  /* The service worker stamps X-Gaffer-Cached-At onto anything it serves from
+     its cache, which it only does when the backend could not be reached. A
+     response carrying that header is therefore a *replay*, and the numbers in
+     it may already be worthless — a projection is only true until the next
+     team news. Record the oldest one seen; boot() turns it into a banner. */
+  function noteStaleness(res) {
+    var at;
+    try { at = res.headers.get('X-Gaffer-Cached-At'); } catch (e) { at = null; }
+    if (!at) return;
+    if (!store.stale) store.stale = { at: at, calls: 0 };
+    else if (at < store.stale.at) store.stale.at = at;   // ISO strings sort
+    store.stale.calls += 1;
+    // A lazily loaded view (captain, chips) can go stale long after boot, so
+    // the warning cannot live in boot() alone.
+    if (store.mode === 'live') announceStale();
+  }
+
   function request(path, opts) {
     opts = opts || {};
     var budget = opts.timeout || timeoutFor(path);
@@ -130,6 +150,7 @@
     }
     return fetch(apiUrl(path), init).then(function (res) {
       if (timer) clearTimeout(timer);
+      noteStaleness(res);
       var ct = res.headers.get('content-type') || '';
       var parse = ct.indexOf('json') >= 0 ? res.json() : res.text();
       return parse.then(function (body) {
@@ -556,9 +577,32 @@
     );
   }
 
+  /* Offline replay. The dashboard opened, it has numbers on it, and every one
+     of them came off the phone rather than off the model. Say so loudly and in
+     the two places a user looks — the source pill and a banner — because the
+     failure mode this guards against is a transfer made at 17:29 against a
+     projection that predates an injury. */
+  function announceStale() {
+    var when = U.localDate(store.stale.at, true) || 'earlier';
+    document.body.classList.add('is-stale');
+    setSource('stale', 'CACHED · ' + when);
+    banner(
+      '<b>OFFLINE — cached numbers, not a live projection.</b> The backend could ' +
+      'not be reached, so ' + store.stale.calls + ' request' +
+      (store.stale.calls === 1 ? '' : 's') + ' ' +
+      (store.stale.calls === 1 ? 'was' : 'were') + ' answered from this phone\'s ' +
+      'cache, saved ' + U.esc(when) + '. Prices, injuries and team news since ' +
+      'then are missing. <b>Do not make a transfer or set a captain off this ' +
+      'screen.</b> Reconnect to the Mac and reload before the deadline.',
+      'err', [{ label: 'Retry', fn: boot }]
+    );
+  }
+
   function boot() {
     store.mode = 'loading';
+    store.stale = null;
     document.body.classList.remove('is-sample');
+    document.body.classList.remove('is-stale');
     setSource('busy', 'connecting…');
     clearBanner();
     renderView(store.view, true);
@@ -572,6 +616,8 @@
                (store.gw + store.horizon - 1) + '</code>, then reload.', 'err',
                [{ label: 'Reload', fn: boot }]);
       }
+      // last, so it owns the banner: nothing outranks "these numbers are old"
+      if (store.stale) announceStale();
       renderView(store.view, true);
       startClocks();
       // the authoritative GW19 chip deadline lives behind /api/chips; pull it in
@@ -837,10 +883,43 @@
     });
   }
 
+  // ------------------------------------------------- service worker / PWA --
+
+  /* Registered from "/sw.js" so the worker's scope is the whole origin, which
+     is what lets the app open from the home screen with the Mac asleep.
+     The server sends it no-store, so every launch revalidates it. */
+  function registerWorker() {
+    if (!('serviceWorker' in navigator)) return;
+    if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+
+    // True only if this page was already under a worker's control. A first
+    // install also fires controllerchange (because the worker calls
+    // clients.claim), and reloading on that would loop the very first visit.
+    var wasControlled = !!navigator.serviceWorker.controller;
+    var reloading = false;
+
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (!wasControlled || reloading) return;
+      // A new build took over mid-session. The document in front of the user
+      // was assembled from the old one, so reload once rather than run a mix.
+      reloading = true;
+      location.reload();
+    });
+
+    navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })
+      .catch(function (err) {
+        // Never fatal: without a worker the dashboard is exactly what it was
+        // before, an online-only page.
+        if (window.console) console.warn('service worker registration failed:', err);
+      });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     wire();
     store.view = (location.hash || '#squad').slice(1);
     if (VIEWS.indexOf(store.view) < 0) store.view = 'squad';
     boot();
+    // after boot: the first paint should not queue behind a precache
+    registerWorker();
   });
 })();

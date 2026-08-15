@@ -7,9 +7,18 @@ from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+
+# Where the fetched FPL data, the fitted-model reports and the projection cache
+# live. Normally alongside the code, but a hosted deploy needs them on a mounted
+# volume instead: on Render the repo is rebuilt from git on every deploy, so
+# anything written next to the code is thrown away, and a cold start would
+# refetch 587 player summaries and refit from scratch. Point GAFFER_DATA_DIR at
+# the disk mount and the cache survives deploys and restarts.
+_ENV_DATA_DIR = (os.environ.get("GAFFER_DATA_DIR") or "").strip()
+DATA_DIR = os.path.abspath(_ENV_DATA_DIR) if _ENV_DATA_DIR else os.path.join(PROJECT_ROOT, "data")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
-REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
+# Reports are model fits, so they belong with the data they were fitted from.
+REPORTS_DIR = os.path.join(DATA_DIR, "reports") if _ENV_DATA_DIR else os.path.join(PROJECT_ROOT, "reports")
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
 
 FPL_API_BASE = "https://fantasy.premierleague.com/api"

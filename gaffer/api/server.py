@@ -21,7 +21,9 @@ Two other things shape the design.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import logging
 import math
 import os
@@ -36,10 +38,11 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from gaffer.api.auth import auth_middleware
 from gaffer.core import scoring
 from gaffer.core.config import CACHE_DIR, PROJECT_ROOT, Config
 from gaffer.core.types import (
@@ -61,6 +64,95 @@ log = logging.getLogger(__name__)
 
 WEB_DIR = os.path.join(PROJECT_ROOT, "gaffer", "web")
 DEFAULT_PORT = 8770
+
+# ---------------------------------------------------------------------------
+# The installable shell
+#
+# Every asset the dashboard loads is stamped with its own mtime (app.js?v=…)
+# wherever it is referenced: in index.html, inside manifest.webmanifest, and in
+# the precache list injected into sw.js. Three things fall out of that.
+#
+#   * A browser cannot serve yesterday's app.js against today's index.html:
+#     the URL itself changed.
+#   * The service worker can treat a stamped URL as immutable and answer from
+#     cache with no revalidation, which is what makes the phone open offline.
+#   * SHELL_BUILD, a hash over all the stamps, goes into the service worker's
+#     cache name, so editing any one of these files changes sw.js's *bytes*.
+#     That is the only signal a browser uses to notice a new worker, so the
+#     worker can never end up newer or older than the shell it controls.
+#
+# Order matters only for readability; add new dashboard assets here.
+# ---------------------------------------------------------------------------
+SHELL_ASSETS: Tuple[str, ...] = (
+    "styles.css",
+    "sample.js",
+    "ui.js",
+    "views.js",
+    "app.js",
+    "manifest.webmanifest",
+    "icons/icon-180.png",
+    "icons/icon-192.png",
+    "icons/icon-512.png",
+    "icons/icon-512-maskable.png",
+)
+
+
+def _asset_mtime(rel: str) -> Optional[int]:
+    """Whole-second mtime of a shell asset, or None if it is not installed."""
+    try:
+        return int(os.path.getmtime(os.path.join(WEB_DIR, *rel.split("/"))))
+    except OSError:
+        return None
+
+
+def stamp_shell_assets(text: str) -> str:
+    """Rewrite every quoted reference to a shell asset with its mtime stamp.
+
+    Handles both the relative form used in index.html (``"app.js"``) and the
+    root-absolute form used in the manifest (``"/icons/icon-192.png"``). A
+    missing file is left alone rather than stamped with a lie.
+    """
+    for asset in SHELL_ASSETS:
+        stamp = _asset_mtime(asset)
+        if stamp is None:
+            continue
+        text = text.replace('"%s"' % asset, '"%s?v=%d"' % (asset, stamp))
+        text = text.replace('"/%s"' % asset, '"/%s?v=%d"' % (asset, stamp))
+    return text
+
+
+def shell_urls() -> List[str]:
+    """The precache list: the document plus every installed shell asset."""
+    urls = ["/"]
+    for asset in SHELL_ASSETS:
+        stamp = _asset_mtime(asset)
+        if stamp is None:
+            continue
+        urls.append("/%s?v=%d" % (asset, stamp))
+    return urls
+
+
+def shell_build() -> str:
+    """Short hash over the shell's mtimes: the service worker's cache key."""
+    parts = []
+    for asset in ("index.html",) + SHELL_ASSETS:
+        parts.append("%s:%s" % (asset, _asset_mtime(asset)))
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def build_service_worker() -> str:
+    """sw.js with the build hash and the stamped precache list injected."""
+    with open(os.path.join(WEB_DIR, "sw.js"), "r", encoding="utf-8") as fh:
+        text = fh.read()
+    text = text.replace('"__GAFFER_BUILD__"', json.dumps(shell_build()))
+    text = text.replace('"__GAFFER_SHELL__"', json.dumps(shell_urls()))
+    return text
+
+
+def build_manifest() -> str:
+    """manifest.webmanifest with its icon URLs stamped."""
+    with open(os.path.join(WEB_DIR, "manifest.webmanifest"), "r", encoding="utf-8") as fh:
+        return stamp_shell_assets(fh.read())
 
 # How long a fitted snapshot is served before a background rebuild is started.
 # The FPL API is Fastly-cached at max-age=300 and prices move once a day, so
@@ -919,6 +1011,10 @@ def create_app(config: Optional[Config] = None, horizon: Optional[int] = None) -
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
+    # Registered after CORS so it runs *inside* it: preflight still gets its
+    # headers, but every real request passes the password gate first. Only
+    # /api/health is exempt, because Render's health check cannot authenticate.
+    app.middleware("http")(auth_middleware)
 
     # -- errors: always JSON with a usable message, never a stack trace ------
     # Registered against Starlette's class, not FastAPI's subclass, so that a
@@ -1589,13 +1685,11 @@ def create_app(config: Optional[Config] = None, horizon: Optional[int] = None) -
             try:
                 with open(path, "r", encoding="utf-8") as fh:
                     html = fh.read()
-                for asset in ("styles.css", "sample.js", "ui.js", "views.js", "app.js"):
-                    asset_path = os.path.join(WEB_DIR, asset)
-                    if not os.path.exists(asset_path):
-                        continue
-                    stamp = int(os.path.getmtime(asset_path))
-                    html = html.replace('"%s"' % asset, '"%s?v=%d"' % (asset, stamp))
-                return HTMLResponse(html, status_code=200)
+                # no-store on the document itself. It is the only unstamped URL
+                # in the shell, so if *it* were cached the browser would hold a
+                # map of stale stamps and the whole scheme unwinds. It is 3 kB.
+                return HTMLResponse(stamp_shell_assets(html), status_code=200,
+                                    headers={"Cache-Control": "no-cache, must-revalidate"})
             except OSError:
                 return FileResponse(path)
         return HTMLResponse(
@@ -1606,6 +1700,40 @@ def create_app(config: Optional[Config] = None, horizon: Optional[int] = None) -
             "or <a style='color:#6cf' href='/api/docs'>/api/docs</a>.</p></body></html>" % WEB_DIR,
             status_code=200,
         )
+
+    # -- PWA plumbing -------------------------------------------------------
+    # Both of these could be served by the StaticFiles mount, and both are
+    # served by hand instead: sw.js has the build injected into it, and neither
+    # can be allowed to depend on the host's mimetypes database for its
+    # Content-Type (a manifest served as text/plain is ignored, and a worker
+    # served as anything but JavaScript refuses to register).
+
+    @app.get("/sw.js", include_in_schema=False)
+    def service_worker() -> Any:
+        try:
+            body = build_service_worker()
+        except OSError:
+            raise HTTPException(status_code=404, detail="sw.js is not installed")
+        return Response(
+            body,
+            media_type="text/javascript",
+            headers={
+                # The worker controls the cache, so it must never *be* cached:
+                # a stale worker would keep serving a shell it no longer
+                # matches, and nothing could dislodge it.
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Service-Worker-Allowed": "/",
+            },
+        )
+
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    def web_manifest() -> Any:
+        try:
+            body = build_manifest()
+        except OSError:
+            raise HTTPException(status_code=404, detail="manifest.webmanifest is not installed")
+        return Response(body, media_type="application/manifest+json",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
 
     if os.path.isdir(WEB_DIR):
         # Mounted last so every /api route above wins the match.

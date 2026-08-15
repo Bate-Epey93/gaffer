@@ -920,6 +920,85 @@ def cmd_backtest(args: argparse.Namespace, ctx: Context) -> int:
     return EXIT_OK
 
 
+def cmd_autorefresh(args: argparse.Namespace, ctx: Context) -> int:
+    """The unattended path: decide whether to refresh, then do only that.
+
+    Called hourly by launchd, so the common case has to be a cheap no. All the
+    policy lives in gaffer.ops.autorefresh; this is the reporting shell around
+    it. It never runs the backtest.
+    """
+    from gaffer.ops import autorefresh as auto
+
+    config = ctx.config
+    if getattr(args, "horizon", None):
+        config.model.default_horizon = int(args.horizon)
+
+    now = auto.utcnow()
+    decision = auto.plan(config, now=now, force=args.force)
+
+    def report(outcome: str, extra: Optional[List[List[Any]]] = None) -> None:
+        rows: List[List[Any]] = [
+            ["decision", decision.action],
+            ["why", decision.reason],
+            ["data age", auto.human_seconds(decision.cache_age)],
+            ["staleness limit", auto.human_seconds(decision.max_age)],
+            ["next deadline", "GW%d in %s" % (decision.next_gw,
+                                              auto.human_seconds(decision.seconds_to_deadline))
+                              if decision.next_gw else "-"],
+            ["deadline window", "yes (%s limit)" % auto.human_seconds(auto.PRE_DEADLINE_MAX_AGE)
+                                if decision.near_deadline else "no"],
+            ["horizon", "GW%d-%d" % (decision.gws[0], decision.gws[-1])],
+            ["projections", "%s (%s)" % (os.path.basename(decision.projections_path),
+                                         "current" if decision.projections_fresh else "stale")],
+        ]
+        if decision.consecutive_failures:
+            rows.append(["failure streak", "%d, retry after %s" % (
+                decision.consecutive_failures,
+                decision.retry_after.isoformat() if decision.retry_after else "-")])
+        rows.extend(extra or [])
+        rows.append(["outcome", outcome])
+        print(heading("gaffer autorefresh — %s" % now.isoformat(timespec="seconds")))
+        print(render_table(["item", "value"], rows, align="ll"))
+
+    lock = auto.SingleFlight()
+    if not lock.acquire():
+        # Not an error: launchd fired while a slow run was still going.
+        report("skipped — another autorefresh holds %s (%s)"
+               % (os.path.basename(auto.LOCK_PATH), lock.holder or "unknown pid"))
+        return EXIT_OK
+    try:
+        if args.dry_run:
+            report("dry run — would %s" % ("do nothing" if not decision.works
+                                           else decision.action))
+            return EXIT_OK
+        if not decision.works:
+            report("nothing to do")
+            return EXIT_OK
+
+        ctx.progress.say("autorefresh: %s (%s)" % (decision.action, decision.reason))
+        try:
+            stats = auto.perform(decision, config, ctx.progress)
+        except Exception as exc:  # noqa: BLE001 - any failure must back off, not crash
+            state = auto.record_failure(now, "%s: %s" % (type(exc).__name__, exc))
+            delay = auto.backoff_seconds(int(state["consecutive_failures"]))
+            report("FAILED: %s: %s" % (type(exc).__name__, exc),
+                   [["backing off", "%s (failure %d), next attempt %s"
+                     % (auto.human_seconds(delay), state["consecutive_failures"],
+                        state["retry_after"])]])
+            return EXIT_FAIL
+        auto.record_success(now, stats)
+        report("done in %.1fs" % stats["seconds"], [
+            ["fetched from FPL", "yes" if stats["fetched"] else "no (local recompute)"],
+            ["load / fit / project", "%.1fs / %.1fs / %.1fs" % (
+                stats["load_seconds"], stats["fit_seconds"], stats["project_seconds"])],
+            ["players projected", stats["players"]],
+            ["written", stats["projections_path"]],
+        ])
+        return EXIT_OK
+    finally:
+        lock.release()
+
+
 def cmd_serve(args: argparse.Namespace, ctx: Context) -> int:
     import uvicorn
 
@@ -943,6 +1022,14 @@ def cmd_serve(args: argparse.Namespace, ctx: Context) -> int:
         ],
         align="ll",
     ))
+    from gaffer.api.auth import configured_password, startup_warning
+
+    warning = startup_warning(args.host)
+    if warning:
+        print("\n  !! %s" % warning)
+    elif configured_password():
+        print("\n  password protection is ON (GAFFER_PASSWORD is set).")
+
     print("\nThe browser must never call fantasy.premierleague.com directly — it "
           "sends no CORS headers.\nEverything is proxied and cached here. Ctrl-C to stop.\n")
     sys.stdout.flush()
@@ -1167,6 +1254,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-save", action="store_true",
                    help="do not write reports/backtest_{season}.json")
     p.set_defaults(func=cmd_backtest)
+
+    p = add("autorefresh", "refresh the data only if it has gone stale",
+            "The unattended refresh. Decides whether the cached data needs "
+            "refetching (older than 24h, or older than 2h when the next deadline "
+            "is inside 12h), and if it does, refetches it, refits the model and "
+            "rewrites the projection cache so the dashboard opens instantly. "
+            "Cheap and idempotent when the answer is no, single-flighted through "
+            "a lock file, and it backs off instead of retrying a failing API. "
+            "Safe to call every hour from launchd. Never runs the backtest.")
+    p.add_argument("--force", action="store_true",
+                   help="refresh regardless of age, backoff or freshness")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the decision and exit without fetching anything")
+    p.add_argument("--horizon", type=int,
+                   help="gameweeks to project (default %d, matching the server)"
+                        % Config().model.default_horizon)
+    p.set_defaults(func=cmd_autorefresh)
 
     p = add("serve", "run the API and dashboard",
             "Start the FastAPI backend on port %d and serve gaffer/web/ at /."

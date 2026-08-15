@@ -334,6 +334,87 @@ Serves the dashboard at `http://127.0.0.1:8770/` and a JSON API under `/api/`
 CORS is restricted to localhost. The dashboard is vanilla JS with no build step and no
 CDN dependencies.
 
+`--host 127.0.0.1` is the default and only this machine can reach it. To reach the
+dashboard from a phone, see [Running it unattended](#running-it-unattended-macos).
+
+### `autorefresh` — refresh the data, but only if it has gone stale
+
+```bash
+gaffer autorefresh --dry-run     # print the decision, change nothing
+gaffer autorefresh               # do it, if it needs doing
+gaffer autorefresh --force       # do it regardless
+```
+
+Built to be called on a timer, so the usual answer is "nothing to do" in about half a
+second with no HTTP request at all. It refetches when the cached `bootstrap` is older
+than **24 hours** — or older than **2 hours** when the next deadline is inside 12 hours,
+because team news, injuries and price changes all land in that last day.
+
+After fetching it refits the model and rewrites the projection cache for the same
+gameweek range the server builds, so the dashboard opens instantly. It also handles the
+opposite case: if the data is current but the projection file is missing or older than
+the data behind it, it recomputes locally and touches the network not at all.
+
+Unattended-safe by construction. One run at a time (an `flock` on
+`data/autorefresh.lock`); failures are counted in `data/autorefresh.json` and the next
+attempt backs off 15m → 30m → 1h → 2h → 4h → 6h rather than hammering a failing API. It
+**never** runs the backtest.
+
+```
++-----------------+--------------------------------------------------+
+| item            | value                                            |
++-----------------+--------------------------------------------------+
+| decision        | skip                                             |
+| why             | data is 11m old, limit 24.0h; projections current|
+| next deadline   | GW1 in 6.5d                                      |
+| deadline window | no                                               |
+| projections     | projections_1_6.json (current)                   |
+| outcome         | nothing to do                                    |
++-----------------+--------------------------------------------------+
+```
+
+---
+
+## Running it unattended (macOS)
+
+Two launchd LaunchAgents: the server starts at login and is restarted if it dies, and
+`autorefresh` runs hourly and decides for itself whether there is anything to do.
+
+```bash
+./scripts/install-macos.sh          # writes both plists, loads them, prints the URL
+./scripts/uninstall-macos.sh        # removes them again
+```
+
+Both are idempotent — re-run either at any time. `install-macos.sh` takes `--port N`,
+`--host ADDR` and `--interval SECONDS`.
+
+**Where it binds.** `scripts/gaffer-launchd.sh` decides at start-up, in this order:
+
+1. `$GAFFER_HOST`, if set. Set it to `127.0.0.1` to make the server local-only again.
+2. The Mac's **Tailscale** address, if Tailscale is installed and up. This is the one
+   you want: the phone reaches the Mac over the tailnet, nothing else can see the port,
+   and no authentication is needed because nothing untrusted can connect.
+3. `0.0.0.0`, with a warning in the log. This is reachable by **every device on the
+   local wifi**, and gaffer has no login by design. Set `GAFFER_REQUIRE_TAILSCALE=1` to
+   refuse the fallback and wait for Tailscale instead.
+
+**The Mac must stay awake.** A sleeping Mac answers nothing. The display may sleep; the
+machine may not. System Settings → Battery (or Energy Saver) → Options → *Prevent
+automatic sleeping when the display is off*, and *Wake for network access*. From a
+terminal: `sudo pmset -c sleep 0 womp 1`, check with `pmset -g`.
+
+On the phone, open the URL in Safari and use Share → Add to Home Screen; it then opens
+full screen with its own icon.
+
+| | |
+| --- | --- |
+| status | `launchctl list \| grep gaffer` |
+| restart the server | `launchctl kickstart -k gui/$(id -u)/com.gaffer.server` |
+| refresh now | `launchctl kickstart gui/$(id -u)/com.gaffer.autorefresh` |
+| logs | `~/Library/Logs/gaffer/server.log`, `~/Library/Logs/gaffer/autorefresh.log` |
+
+Logs rotate at 5 MB, keeping one previous file.
+
 ---
 
 ## Reading the numbers
@@ -447,6 +528,8 @@ gaffer/optimize/   squad MILP, transfer planner, chips, rank strategy
 gaffer/backtest/   walk-forward season replay and metrics
 gaffer/api/        FastAPI server
 gaffer/web/        dashboard (vanilla JS, no build step)
+gaffer/ops/        unattended operation: the autorefresh policy, lock and backoff
+scripts/           launchd installer, uninstaller, and the wrapper launchd runs
 data/cache/        everything fetched, plus cached projections (gitignored)
 reports/           fitted model parameters and backtest results (gitignored)
 ```

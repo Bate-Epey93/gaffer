@@ -6,8 +6,24 @@
 <meta name="color-scheme" content="dark">
 <meta name="referrer" content="no-referrer">
 <title>gaffer — FPL 2026/27</title>
-<!-- empty data URI: suppresses the favicon request without referencing anything external -->
-<link rel="icon" href="data:,">
+
+<!-- installable app. Every asset here is stamped with its own mtime by the
+     server (see index() in gaffer/api/server.py) so a new build cannot be
+     served from a stale browser cache. -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#07080a">
+
+<!-- iOS home screen. apple-touch-icon must be opaque and square: iOS applies
+     its own mask, and a transparent PNG is composited onto black. -->
+<link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<!-- black-translucent puts our own background under the status bar; the
+     topbar pays for it with padding-top: env(safe-area-inset-top). -->
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="gaffer">
+
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>

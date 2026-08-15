@@ -6,4 +6,5 @@ highspy>=1.7
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pytest>=7.4
+httpx>=0.27
 python-dateutil>=2.8

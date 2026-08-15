@@ -1,0 +1,50 @@
+# Render Blueprint for gaffer.
+#
+# One web service. No cron job and no worker, deliberately: the server already
+# rebuilds its own snapshot in the background when it goes stale (Store.ttl),
+# serving the old one meanwhile, so an external scheduler would only duplicate
+# that. A Render cron job also runs on its own instance with its own filesystem,
+# so it could not warm the web service's cache even if we wanted it to.
+#
+# Deploy: push this repo to GitHub, then in the Render dashboard choose
+# New > Blueprint and point it at the repo. Render reads this file.
+
+services:
+  - type: web
+    name: gaffer
+    runtime: python
+    # starter, not free: free instances spin down after inactivity, and the cold
+    # start here is not a web framework booting — it is refetching FPL data and
+    # refitting six models. That is a ~30-60s wait at the exact moment you are
+    # checking a deadline. Free also cannot mount the disk below.
+    plan: starter
+    region: frankfurt
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    # 0.0.0.0 so Render's proxy can reach the process; $PORT is injected.
+    startCommand: python -m gaffer.cli serve --host 0.0.0.0 --port $PORT
+    # Open, unauthenticated, and cheap. Returns 200 with status "loading" while
+    # the model fits, so the first deploy is not rolled back mid-fit.
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      # The code is written for 3.9+ and tested on 3.9; 3.11 is the modern
+      # supported runtime and pulls prebuilt wheels for numpy/pandas/highspy.
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Render generates this once and keeps it. Read it from the dashboard
+      # (Environment tab) to log in. Never commit a value here.
+      - key: GAFFER_PASSWORD
+        generateValue: true
+      - key: GAFFER_USERNAME
+        value: gaffer
+      # Keep the 35 MB data cache and the fitted models on the disk below, so a
+      # deploy or restart does not refetch 587 player summaries and refit.
+      - key: GAFFER_DATA_DIR
+        value: /var/gaffer
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    disk:
+      name: gaffer-data
+      mountPath: /var/gaffer
+      sizeGB: 1
