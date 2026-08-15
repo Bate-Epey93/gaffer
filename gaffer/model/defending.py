@@ -623,7 +623,9 @@ class DefendingModel:
         xp_cs = scoring.clean_sheet_points(
             position, stats.p_clean_sheet(lam) ** on_pitch, p_60
         )
-        xp_gc = scoring.expected_goals_conceded_points(position, lam * on_pitch, p_60)
+        # Conceded points need only an appearance, not 60 minutes.
+        p_on = 1.0 if played > 0 else 0.0
+        xp_gc = scoring.expected_goals_conceded_points(position, lam * on_pitch, p_on)
         xp_sv = (
             scoring.expected_save_points(lam_saves)
             if position == scoring.GKP else 0.0
@@ -757,7 +759,7 @@ class DefendingModel:
         return scoring.expected_goals_conceded_points(
             player.position,
             self._lambda_conceded(ctx) * self.on_pitch_fraction(ctx),
-            self._p_60(ctx),
+            self._p_appear(ctx),
         )
 
     def project_saves(self, player_id: int, ctx: "FixtureContext") -> float:
@@ -817,7 +819,7 @@ class DefendingModel:
         p_clean_sheet = p_cs_on_pitch * p_60
         xp_cs = scoring.clean_sheet_points(pos, p_cs_on_pitch, p_60)
         xp_conceded = scoring.expected_goals_conceded_points(
-            pos, lam_conceded * on_pitch, p_60
+            pos, lam_conceded * on_pitch, self._p_appear(ctx)
         )
 
         lam_saves = 0.0
@@ -950,6 +952,13 @@ class DefendingModel:
         if mf is None:
             return 1.0
         return max(0.0, min(1.0, float(mf.p_60)))
+
+    def _p_appear(self, ctx: "FixtureContext") -> float:
+        """P(the player gets on the pitch at all) — the gate for conceded points."""
+        mf = self._minutes(ctx)
+        if mf is None:
+            return 1.0
+        return max(0.0, min(1.0, float(mf.p_appear)))
 
     @staticmethod
     def _lambda_conceded(ctx: "FixtureContext") -> float:
@@ -1199,7 +1208,10 @@ if __name__ == "__main__":
         pen = 5 * fp.pens_faced_per_match * fp.pen_save_rate * min(mins, 90.0) / 90.0
         p60 = 1 if mins >= 60 else 0
         a_cs = 4 * (1 if (p60 and r["goals_conceded"] == 0) else 0)
-        a_gc = -(int(r["goals_conceded"]) // 2) * p60
+        # No 60-minute gate here: FPL deducts for goals conceded on the pitch
+        # regardless of minutes. Gating it made this harness reproduce the
+        # model's own bug on the ground-truth side, so it could never catch it.
+        a_gc = -(int(r["goals_conceded"]) // 2)
         a_sv = int(r["saves"]) // 3
         actual = a_cs + a_gc + a_sv + 5 * int(r["penalties_saved"])
         comp["cs"][0] += pred["xp_clean_sheet"]; comp["cs"][1] += a_cs

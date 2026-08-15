@@ -978,7 +978,9 @@ class XPEngine:
         conceded = np.where(cs_draw, 0, np.minimum(conceded, MAX_CONCEDED))
         cs_hit = cs_draw & long60
         cs_pts = scoring.CLEAN_SHEET_POINTS[pos] * cs_hit
-        conc_pts = scoring.GOALS_CONCEDED_POINTS[pos] * (conceded // scoring.GOALS_CONCEDED_PER) * long60
+        # Conceded points land on anyone who was on the pitch; only the clean
+        # sheet needs 60+. Gating this on `long60` forgave every sub-60 cameo.
+        conc_pts = scoring.GOALS_CONCEDED_POINTS[pos] * (conceded // scoring.GOALS_CONCEDED_PER) * on
 
         # --- saves and penalty saves ----------------------------------------
         if pos == scoring.GKP:

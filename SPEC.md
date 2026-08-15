@@ -314,14 +314,20 @@ class BonusModel:
     def fit(self, state: GameState) -> None
     def project_bps(self, player_id, fixture_ctx, projections) -> float
     def project_bonus(self, fixture_id: int, candidates: Dict[int, float]) -> Dict[int, float]
-        # {player_id: expected bonus points}, must sum to <= 6 per fixture
+        # {player_id: expected bonus points}, must sum to <= BONUS_POT_SANITY_LIMIT
 ```
 
 Implement BPS as an event-weighted score using the **2026/27** weights, then use
 `stats.top_k_probabilities` to convert each player's projected BPS (plus fitted
-noise) into P(1st)/P(2nd)/P(3rd), then to expected bonus. The constraint that a
-match awards exactly 3+2+1 points is a strong one — respect it, and unit-test that
-per-fixture expected bonus sums to at most 6.
+noise) into P(1st)/P(2nd)/P(3rd), then to expected bonus.
+
+A fixture pays 3+2+1 = 6 **only when the top three BPS scores are distinct**. Ties
+pay more: a tie for first pays 3+3+1, a tie for second pays 3+2+2, and a three-way
+tie for first pays 3+3+3. So 6 is not the bound — the ceiling is 9, and 2025/26
+actually averaged 6.366 per fixture. Assert against `bonus.BONUS_POT_SANITY_LIMIT`
+(9.0), not against 6: a pot of 6.4 is the game working correctly, a pot above the
+limit means the bonus ranker is broken. Unit-test that bound, and keep the observed
+mean near 6.4 as a calibration check.
 
 Do not fabricate exact BPS weights that were not verified. Where an exact weight is
 unknown, fit it: regress observed BPS on observed event counts using last season's

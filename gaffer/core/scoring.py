@@ -112,13 +112,17 @@ def poisson_pmf(k: int, lam: float) -> float:
 
 
 def expected_goals_conceded_points(
-    position: int, lam_conceded: float, p_60: float, max_goals: int = 12
+    position: int, lam_conceded: float, p_appear: float, max_goals: int = 12
 ) -> float:
-    """E[-1 * floor(conceded / 2)] under Poisson(lam_conceded), scaled by P(60+).
+    """E[-1 * floor(conceded / 2)] under Poisson(lam_conceded), scaled by P(appear).
 
-    FPL only docks conceded points for goals let in while the player is on the
-    pitch. Approximating with "player played the whole match" is standard and
-    is what every public model does; p_60 scales the whole term.
+    FPL docks conceded points for goals let in while the player is on the pitch,
+    with NO minutes threshold — the 60-minute condition applies to the clean
+    sheet only. So this is gated on appearing at all, and the caller is expected
+    to have already scaled ``lam_conceded`` by the fraction of the match the
+    player is on for. Gating it on P(60+) instead silently forgives every sub-60
+    appearance: measured against the real 2025/26 rows that was 96 points a
+    season of deductions that never landed.
     """
     per = GOALS_CONCEDED_POINTS[position]
     if per == 0:
@@ -126,7 +130,7 @@ def expected_goals_conceded_points(
     total = 0.0
     for k in range(0, max_goals + 1):
         total += poisson_pmf(k, lam_conceded) * (k // GOALS_CONCEDED_PER)
-    return per * total * p_60
+    return per * total * p_appear
 
 
 def expected_save_points(lam_saves: float, max_saves: int = 20) -> float:

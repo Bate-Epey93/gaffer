@@ -1,9 +1,9 @@
 .venv/
 __pycache__/
 *.pyc
-data/cache/*.json
-data/cache/*.parquet
+data/cache/
 data/raw/
+.claude/
 reports/*.json
 .DS_Store
 config.json

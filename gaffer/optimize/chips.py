@@ -438,6 +438,64 @@ def _poisson_binomial_tail(probs: Sequence[float]) -> List[float]:
     return tail
 
 
+def _poisson_binomial_pmf(probs: Sequence[float]) -> List[float]:
+    """``[P(X = 0), P(X = 1), ...]`` for independent Bernoullis."""
+    pmf = [1.0]
+    for q in probs:
+        nxt = [0.0] * (len(pmf) + 1)
+        for k, p in enumerate(pmf):
+            nxt[k] += p * (1.0 - q)
+            nxt[k + 1] += p * q
+        pmf = nxt
+    return pmf
+
+
+def _xi_formation_is_legal(counts: Dict[int, int]) -> bool:
+    """Outfield counts only; the keeper slot is never in play here."""
+    for pos in (scoring.DEF, scoring.MID, scoring.FWD):
+        n = counts.get(pos, 0)
+        if n < scoring.SQUAD_MIN_PLAY[pos] or n > scoring.SQUAD_MAX_PLAY[pos]:
+            return False
+    return True
+
+
+def _outfield_autosubs(
+    xi_counts: Dict[int, int],
+    failures: Dict[int, int],
+    bench_positions: Sequence[int],
+    bench_played: Sequence[bool],
+) -> List[int]:
+    """Indices of the bench outfielders FPL would actually bring on.
+
+    FPL walks the non-playing starters and, for each, takes the first bench
+    player (in bench order) who played *and whose introduction leaves a legal
+    formation*. That last clause is the whole point: with exactly three
+    defenders in the XI, a missing defender cannot be covered by a midfield sub,
+    because 2-6-2 is not a team you are allowed to field. The move is skipped
+    and the bench player scores nothing.
+    """
+    counts = dict(xi_counts)
+    remaining = dict(failures)
+    used: List[int] = []
+    for slot, pos_in in enumerate(bench_positions):
+        if not bench_played[slot]:
+            continue
+        if sum(remaining.values()) <= 0:
+            break
+        for pos_out in (scoring.DEF, scoring.MID, scoring.FWD):
+            if remaining.get(pos_out, 0) <= 0:
+                continue
+            trial = dict(counts)
+            trial[pos_out] -= 1
+            trial[pos_in] = trial.get(pos_in, 0) + 1
+            if _xi_formation_is_legal(trial):
+                counts = trial
+                remaining[pos_out] -= 1
+                used.append(slot)
+                break
+    return used
+
+
 def _autosub_value(
     xi: Sequence[int], bench: Sequence[int], projections: ProjectionSet, gw: int, state: Any
 ) -> float:
@@ -446,6 +504,13 @@ def _autosub_value(
     Bench Boost is only worth the bench *minus this*: a benched player who would
     have come on for an absent starter anyway is not new points. The reserve
     keeper is handled separately because he only ever replaces the keeper.
+
+    The outfield term is an exact expectation over two things FPL's rule turns
+    on: how many starters of each *position* went missing, and which bench
+    players turned out. Only the position counts matter for legality and the
+    identity of the absent starter is irrelevant to what the bench scores, so
+    the sum is over at most 6 x 6 x 4 failure patterns and 8 bench-appearance
+    patterns rather than every subset of the eleven.
     """
     gk_xi = [p for p in xi if state.players[p].position == scoring.GKP]
     out_xi = [p for p in xi if state.players[p].position != scoring.GKP]
@@ -456,11 +521,50 @@ def _autosub_value(
     for keeper in gk_bench[:1]:
         p_fail = 1.0 - (_gw_p_appear(projections, gk_xi[0], gw) if gk_xi else 0.0)
         value += p_fail * projections.xp(keeper, gw)
-    fails = [1.0 - _gw_p_appear(projections, p, gw) for p in out_xi]
-    tail = _poisson_binomial_tail(fails)
-    for slot, pid in enumerate(out_bench):
-        p_used = tail[slot + 1] if slot + 1 < len(tail) else 0.0
-        value += p_used * projections.xp(pid, gw)
+    if not out_xi or not out_bench:
+        return value
+
+    xi_counts: Dict[int, int] = {scoring.DEF: 0, scoring.MID: 0, scoring.FWD: 0}
+    fail_pmf: Dict[int, List[float]] = {}
+    for pos in (scoring.DEF, scoring.MID, scoring.FWD):
+        members = [p for p in out_xi if state.players[p].position == pos]
+        xi_counts[pos] = len(members)
+        fail_pmf[pos] = _poisson_binomial_pmf(
+            [1.0 - _gw_p_appear(projections, p, gw) for p in members]
+        )
+
+    bench_positions = [state.players[p].position for p in out_bench]
+    bench_appear = [_gw_p_appear(projections, p, gw) for p in out_bench]
+    # Points *given he played*: the unconditional xP already carries the zero
+    # from not playing, and the appearance draw below reinstates it.
+    bench_points = [
+        (projections.xp(p, gw) / a) if a > 1e-9 else 0.0
+        for p, a in zip(out_bench, bench_appear)
+    ]
+
+    n_bench = len(out_bench)
+    for f_def, p_def in enumerate(fail_pmf[scoring.DEF]):
+        if p_def <= 0.0:
+            continue
+        for f_mid, p_mid in enumerate(fail_pmf[scoring.MID]):
+            if p_mid <= 0.0:
+                continue
+            for f_fwd, p_fwd in enumerate(fail_pmf[scoring.FWD]):
+                if p_fwd <= 0.0 or f_def + f_mid + f_fwd == 0:
+                    continue
+                p_fail = p_def * p_mid * p_fwd
+                failures = {scoring.DEF: f_def, scoring.MID: f_mid, scoring.FWD: f_fwd}
+                for mask in range(1 << n_bench):
+                    played = [bool(mask & (1 << i)) for i in range(n_bench)]
+                    p_mask = 1.0
+                    for i, on in enumerate(played):
+                        p_mask *= bench_appear[i] if on else (1.0 - bench_appear[i])
+                    if p_mask <= 0.0:
+                        continue
+                    for slot in _outfield_autosubs(
+                        xi_counts, failures, bench_positions, played
+                    ):
+                        value += p_fail * p_mask * bench_points[slot]
     return value
 
 

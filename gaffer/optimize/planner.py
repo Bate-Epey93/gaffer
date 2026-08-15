@@ -478,9 +478,21 @@ def _solve_plan(
             prob += hits[w] == 0, "no_hits_%d" % w
             prob += n_transfers <= scoring.SQUAD_SIZE, "transfer_cap_%d" % w
         else:
+            # FPL spends free transfers automatically, so `used` is not a
+            # choice: it is exactly min(free transfers held, transfers made),
+            # and every transfer beyond it costs a -4. Stating those as bounds
+            # instead let the solver buy its way out of the ledger — with a hit
+            # hurdle below what a banked transfer is credited at, it would elect
+            # a hit while holding free transfers, and with a hurdle of zero
+            # `hits` floated free of the transfers made and `expected_points_net`
+            # subtracted -4s for hits nobody took.
+            n_binds = pulp.LpVariable("ft_slack_%d" % w, cat=pulp.LpBinary)
+            big_m = scoring.TRANSFERS_CAP + scoring.MAX_BANKED_FREE_TRANSFERS
             prob += used[w] <= ft[w], "used_le_ft_%d" % w
             prob += used[w] <= n_transfers, "used_le_n_%d" % w
-            prob += n_transfers <= used[w] + hits[w], "cover_transfers_%d" % w
+            prob += used[w] >= ft[w] - big_m * n_binds, "used_ge_ft_%d" % w
+            prob += used[w] >= n_transfers - big_m * (1 - n_binds), "used_ge_n_%d" % w
+            prob += hits[w] == n_transfers - used[w], "cover_transfers_%d" % w
             prob += n_transfers <= scoring.TRANSFERS_CAP, "transfer_cap_%d" % w
         nxt = ft_end if i == len(gws) - 1 else ft[gws[i + 1]]
         prob += nxt <= ft[w] - used[w] + 1, "ft_roll_%d" % w
@@ -1387,7 +1399,11 @@ def _main() -> int:
         == min(scoring.MAX_BANKED_FREE_TRANSFERS, P_WC.decisions[0].free_transfers_after + 1),
         "%d -> %d" % (P_WC.decisions[0].free_transfers_after, WC.free_transfers_after),
     )
-    KEPT = set(WC.squad) - set(t.in_id for t in P_WC.decisions[2].transfers)
+    # The wildcard 15 minus whoever GW3 sells; those are the players that must
+    # still be there afterwards. Subtracting the players GW3 *buys* removes
+    # nothing (they were never in the wildcard squad) and made the gate demand
+    # that GW3 never transfer at all.
+    KEPT = set(WC.squad) - set(t.out_id for t in P_WC.decisions[2].transfers)
     gate(
         "wildcard squad is permanent",
         KEPT <= set(P_WC.decisions[2].squad),
