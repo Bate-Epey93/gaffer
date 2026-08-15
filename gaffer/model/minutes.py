@@ -876,10 +876,31 @@ class MinutesModel:
         return rows
 
     @staticmethod
+    def _price_range(fit_params: MinutesFit, pos: str) -> Optional[Tuple[float, float]]:
+        """The price span the prior was actually fitted over, per position."""
+        rows = fit_params.price_decile_table.get(pos) or []
+        if not rows:
+            return None
+        lo = min(float(r["price_lo"]) for r in rows)
+        hi = max(float(r["price_hi"]) for r in rows)
+        return (lo, hi) if hi > lo else None
+
+    @staticmethod
     def _prior_from_coefs(fit_params: MinutesFit, pos: str, price: float, rank: float) -> float:
         coefs = fit_params.price_prior.get(pos)
         if not coefs:
             return 0.2
+        # Clamp to the price span the curve was fitted over. A logistic in
+        # log(price) extrapolates hard, and the fitted span differs sharply by
+        # position: in 2025/26 the dearest defender in the sample was £6.0m
+        # while forwards ran to £14.0m. Evaluated raw, an £8.0m defender was
+        # pushed to the 0.92 cap on no data at all, while a £15.5m forward sat
+        # at 0.84 on real data -- so a striker who started 34 of 38 scored a
+        # LOWER start probability than a defender who started 30. Clamping
+        # keeps every position on the part of the curve its data supports.
+        span = MinutesModel._price_range(fit_params, pos)
+        if span is not None:
+            price = min(max(price, span[0]), span[1])
         z = (
             coefs["a"]
             + coefs["b_logprice"] * math.log(max(price, 0.1))

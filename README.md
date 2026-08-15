@@ -361,25 +361,35 @@ penalty-save risk, so negative is correct.
 
 ## Known issues
 
-**Premium forwards are under-projected pre-season, and this distorts the GW1 squad.**
-The minutes model blends a player's observed start rate with a price-and-position prior
-fitted from last season. The fitted forward curve saturates far lower than the defender
-curve: an £8.0m defender is already at the prior cap of 0.921, while a forward does not
-reach it at any price the game contains (£15.5m maps to 0.840, and even a hypothetical
-£20m forward only reaches 0.896). The result is that a striker who started 34 of 38
-games is given a *lower* start probability than a defender who started 30 — the model's
-own reason strings print both facts side by side and contradict themselves.
+**~~Premium forwards are under-projected pre-season~~ — FIXED, and the original
+diagnosis was wrong.** The symptom was real: a striker who started 34 of 38 games was
+given a *lower* start probability (Haaland 0.847) than a defender who started 30
+(Gabriel 0.862).
 
-Because expected minutes multiply every other component, this propagates: premium
-forwards lose xP, defenders (who also collect clean sheet and DEFCON floor points) gain
-it, and the optimizer — behaving correctly given its inputs — leaves Haaland out of the
-GW1 squad and captains a £6.0m centre-back in three of the six planned gameweeks.
-**If your GW1 squad has no recognised premium forward and the plan wants to captain a
-defender, this is why.** Sanity-check those picks against your own judgement.
+The cause was not that forwards saturate too low. It was that the price prior — a
+logistic in log(price) — was being evaluated far outside the price span it was fitted
+on, and that span differs sharply by position. In the 2025/26 fitting sample the dearest
+defender was **£6.0m** (empirical start rate 0.605); the curve was then extrapolated up
+to £8.0m and pinned at the 0.92 cap on no data at all. Forwards had real data out to
+£14.0m, so they sat on the fitted part of the curve and were never inflated. Expensive
+defenders were being over-projected, not strikers under-projected.
 
-This is a model problem, not a data problem — `starts` per prior season is present in
-the API and is being read correctly; it is simply outweighed by the extrapolated price
-prior. It should shrink once real 2026/27 minutes arrive from GW2 onward.
+The prior now clamps price to the span each position was actually fitted over, so no
+position is scored off the end of its own data. Haaland 0.834 now correctly outranks
+Gabriel 0.827. This does not move the backtest (0.3513 → 0.3511 on `appeared`, inside
+noise) because the 2025/26 replay prices sit inside the fitted range — the fix is
+justified by not extrapolating, and measured to cost nothing.
+
+**The GW1 squad still contains no £15m striker, and that part is a real judgement, not a
+bug.** Haaland projects 30.0 xP over GW1–6 against B.Fernandes's 29.97 for £3.5m less,
+so the optimizer buys the midfielder and spends the difference. Whether you agree is a
+strategy question: both recent world champions committed to a premium captain almost
+every week. Override with `locked_in` if that is the way you want to play it.
+
+One genuine weakness remains in this area: the low end of the price prior is poorly
+calibrated (cheap defenders fit at 0.62 against an empirical 0.27). It matters little
+for players with a full season of observed minutes, who dominate their own prior, but it
+inflates start probabilities for players with thin histories.
 
 **Two "horizon points" numbers are not comparable.** `squad` reports
 `Horizon expected points N over 6 gameweeks`, which is **decay-weighted** by
