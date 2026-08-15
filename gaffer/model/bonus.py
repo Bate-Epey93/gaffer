@@ -20,14 +20,45 @@ projected points. This module does the two things that actually matter:
     created, successful dribbles). That is a feature here, not a bias: we want
     the total BPS impact of a projected goal, including its correlates.
 
-2.  **Bonus is contested across the whole match.** ``project_bonus`` takes every
-    candidate from *both* teams, draws each player's BPS from a normal centred
-    on their projection with a fitted variance, and reads off P(1st)/P(2nd)/
-    P(3rd) via :func:`gaffer.core.stats.top_k_probabilities`. Because exactly
-    one player takes each rank in every simulation draw, the expected bonus over
-    a full candidate list sums to exactly 3+2+1 = 6.0 by construction. That
-    conservation law is the whole point: get it wrong and every projection in
-    the app inflates.
+2.  **Bonus is contested across the whole match, by simulating the match.**
+    ``project_bonus`` takes every candidate from *both* teams and runs a
+    fixture-level Monte Carlo over the events BPS is actually paid for, then
+    reads off P(1st)/P(2nd)/P(3rd). Because exactly one player takes each rank
+    in every draw, the expected bonus over a full candidate list sums to exactly
+    3+2+1 = 6.0 by construction. That conservation law is the whole point: get
+    it wrong and every projection in the app inflates.
+
+    Three things are drawn per draw rather than smeared into one normal, and
+    each of them was wrong in the closed-form version this replaced:
+
+    * **The clean sheet is one event per team, not eleven.** It is the largest
+      single term a defender or keeper carries - ~15.7 BPS on the 2025/26 fit
+      against ~4.0 of residual noise - and drawing it independently per player
+      spent most draws in worlds where two of a back four kept a clean sheet and
+      the other two did not. One Bernoulli per team per draw, gated by each
+      player's own 60-minute flip, and the goals-conceded count drawn from the
+      complementary branch so a conceded goal docks the whole back line at once.
+    * **A goal is a lump, not a wobble.** As Gaussian variance a goal is
+      symmetric; the truth is Poisson with a 12-24 BPS step. For a forward on
+      0.5 expected goals the normal puts ~2% of its mass beyond two sigma where
+      the Poisson mixture puts ~9%, so the model was under-rating exactly the
+      thing that decides a captaincy call - the chance the striker who scores
+      also takes the three.
+    * **Not appearing is a point mass, not a wider normal.** Folding the
+      appearance probability into a single normal's mean and variance hands a
+      50/50 rotation risk a fat symmetric tail he does not have. Appearance is
+      a Bernoulli, and the BPS distribution is conditional on it.
+
+    Whatever is left - passes, key passes, big chances, dribbles, fouls, all
+    real BPS and none of it projected - stays Gaussian, at the regression's
+    residual sd scaled by expected minutes (measured on 2025/26 the residual sd
+    tracks sqrt(minutes/90) across the minute bands; charging a 15-minute cameo
+    a full starter's BPS noise is what would otherwise let him steal bonus).
+
+    ``candidates`` is still honoured: the simulation is re-centred so each
+    player's expected BPS is exactly what was passed in. The rank vector is
+    cached per fixture and read back through ``rank_probabilities`` - it cannot
+    be reconstructed by re-running a sampler on the means and sds alone.
 
 WARNING - THE 2026/27 COEFFICIENTS ARE 2025/26 FITS PLUS MANUAL RULE PATCHES.
 --------------------------------------------------------------------------
@@ -39,24 +70,32 @@ Four documented rule changes are applied on top of the fit (see
   tackled" is not in any available dataset. It is absorbed in the residual and
   makes this model very slightly pessimistic for take-on heavy attackers.
 * clearances/blocks/interceptions move from 1 BPS per 2 actions to 1 per 3, so
-  the fitted CBI coefficient is scaled by 2/3.
+  -1/6 BPS per action is added to the fitted CBI coefficient.
 * goalkeeper saves are restructured (any save 2 BPS, +1 inside the box, +1 from
   a big chance). The nominal per-save value moves from 2 to ``2 + p_in_box +
-  p_big_chance``; the fitted coefficient is scaled by that ratio. **This is the
-  single largest uncertainty in the module** - the save-type mix is unobservable
-  from our sources, so the ratio is bounded on [1.0, 2.0] and the smoke test
-  prints keeper bonus at the floor, the default and the ceiling. Override
-  ``gk_save_p_in_box`` / ``gk_save_p_big_chance`` on the instance and call
-  ``apply_rule_adjustments()`` to move within that band.
+  p_big_chance``, and that *difference* is added to the fitted coefficient.
+  **This is the single largest uncertainty in the module** - the save-type mix
+  is unobservable from our sources, so the added amount is bounded on [0.0, 2.0]
+  and the smoke test prints keeper bonus at the floor, the default and the
+  ceiling. Override ``gk_save_p_in_box`` / ``gk_save_p_big_chance`` on the
+  instance and call ``apply_rule_adjustments()`` to move within that band.
+
+  All four patches are **additive**, because a fitted coefficient is the table
+  value plus a correlate the regression cannot separate out, and FPL changed the
+  table and not the correlate. The earlier multiplicative form scaled the
+  correlate too: it put a save at 2.59 x 1.5 = 3.89 BPS where the algebra gives
+  2.59 + 1.0 = 3.59, a 0.3 BPS-per-save over-statement that compounds to 1.8 BPS
+  on a six-save night.
 
   Read ``gk_save_marginal_diagnostic`` in the fit report before trusting keeper
   bonus. It measures what a save was *actually* worth in 2025/26 and returns
   2.81 +/- 0.06 BPS, comfortably above the official table's 2. Either the table
-  understated the real value or saves correlate with unmodelled keeper BPS; both
-  readings mean the 1.5x uplift applied here is on the aggressive side, and the
-  effect is not small - it moves the keeper share of all bonus from 6.7% to
-  14.0% on identical events. This is the first number to re-check against live
-  results, and the reason the sensitivity table exists.
+  understated the real value or saves correlate with unmodelled keeper BPS -
+  and on the second reading, adding the full table delta on top of an already
+  generous fitted coefficient still over-projects keeper bonus. The effect is
+  not small: it is the largest single driver of the keeper share of all bonus.
+  This is the first number to re-check against live results, and the reason the
+  sensitivity table exists.
 * the penalty-save BPS drops from 8 to 7, applied as a flat -1 on the fitted
   coefficient.
 
@@ -157,15 +196,23 @@ GK_SAVE_P_IN_BOX = 0.75
 GK_SAVE_P_BIG_CHANCE = 0.25
 PENALTY_SAVE_BPS_DELTA_2627 = -1.0  # 8 -> 7
 
+# A fixture pays 3+2+1 = 6 bonus when the top three BPS scores are distinct and
+# more when they tie: 3-3-1 and 3-2-2 pay 7, 3-3-3 and 3-2-2-2 pay 9. In 2025/26
+# the worst case observed was 9 and the mean 6.366. Nothing caps the payout in
+# the laws of the game - a five-way tie for third would pay 3+2+5 - so this is a
+# sanity limit on the sampler, not a rule. An expected pot near 6.4 is right; an
+# expected pot at this limit means the ranker is broken.
+BONUS_POT_SANITY_LIMIT = 9.0
+
 ADJUSTMENTS_2026_27: Dict[str, str] = {
     "tackled": "-1 BPS for being tackled removed. UNMODELLED: no dataset carries "
     "'times tackled'. Absorbed in the residual; makes attackers marginally "
     "under-projected.",
-    "cbi": "1 BPS per 3 clearances/blocks/interceptions (was per 2). Fitted CBI "
-    "coefficient scaled by 2/3.",
-    "gk_saves": "Any save 2 BPS, +1 inside the box, +1 from a big chance. Fitted "
-    "save coefficient scaled by (2 + p_in_box + p_big_chance) / 2. Largest "
-    "uncertainty in the model; bounded ratio [1.0, 2.0].",
+    "cbi": "1 BPS per 3 clearances/blocks/interceptions (was per 2). -1/6 BPS "
+    "per action added to the fitted CBI coefficient.",
+    "gk_saves": "Any save 2 BPS, +1 inside the box, +1 from a big chance. "
+    "(p_in_box + p_big_chance) BPS added to the fitted save coefficient. Largest "
+    "uncertainty in the model; bounded delta [0.0, 2.0].",
     "penalty_save": "Penalty save BPS 8 -> 7. Flat -1 on the fitted coefficient.",
 }
 
@@ -242,12 +289,51 @@ class EventProjection:
     penalties_missed: float = 0.0
     p_appear: float = 0.0
     lambda_conceded: float = 0.0
+    # The *team* clean-sheet probability, ungated by the 60-minute rule. Kept
+    # alongside the gated ``clean_sheet`` because the fixture simulator has to
+    # draw the clean sheet once for the whole back line and gate it per player.
+    p_clean_sheet_match: float = 0.0
+    # Expected minutes as a fraction of 90, conditional on appearing. The
+    # unobserved half of BPS accumulates through the match, so this scales the
+    # regression residual.
+    minutes_share: float = 1.0
 
     def counts(self) -> Dict[str, float]:
         out = {f: float(getattr(self, f)) for f in FEATURES if hasattr(self, f)}
         out["mins_1_59"] = max(0.0, 1.0 - self.p_60)
         out["mins_60"] = self.p_60
         return out
+
+
+@dataclass
+class BpsComponents:
+    """Everything the fixture-level BPS simulator draws, for one player.
+
+    ``project_bps_and_sd`` reduces a player to a mean and a standard deviation,
+    which is all a Gaussian ranker can use. The simulator wants the pieces back:
+    which part of the spread is a shared team event (the clean sheet), which is
+    a discrete lump (a goal), and which is genuinely idiosyncratic noise.
+    """
+
+    player_id: int
+    team_id: int
+    fixture_id: Optional[int]
+    position: int
+    p_appear: float = 0.0
+    p_60: float = 0.0  # conditional on appearing
+    p_clean_sheet: float = 0.0  # team probability, ungated
+    lambda_conceded: float = 0.0
+    lambda_goals: float = 0.0  # conditional on appearing
+    lambda_assists: float = 0.0
+    w_mins_1_59: float = 0.0
+    w_mins_60: float = 0.0
+    w_goals: float = 0.0
+    w_assists: float = 0.0
+    w_clean_sheet: float = 0.0
+    w_conceded_pairs: float = 0.0
+    mu_other: float = 0.0  # weighted mean of everything not drawn explicitly
+    var_other: float = 0.0  # variance of everything not drawn explicitly
+    mu_cond: float = 0.0  # full expected BPS conditional on appearing
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +384,78 @@ def _var_conceded_pairs(lam: float, max_goals: int = 12) -> float:
     mean = _expected_conceded_pairs(lam, max_goals)
     second = sum(stats.poisson_pmf(k, lam) * (k // 2) ** 2 for k in range(0, max_goals + 1))
     return max(0.0, second - mean * mean)
+
+
+_MAX_CONCEDED = 9
+
+
+def _legacy(name: str) -> bool:
+    """A/B switch for the three changes made to this module, for backtesting.
+
+    ``GAFFER_BONUS_LEGACY=1`` restores all of the pre-change behaviour;
+    ``GAFFER_BONUS_LEGACY_RANKER`` / ``_RESID`` / ``_PATCH`` restore one each, so
+    a replay can attribute a metric move to a single change. Nothing in the app
+    sets these - they exist so the claims in this module's docstrings are
+    checkable rather than asserted.
+    """
+    return bool(os.environ.get("GAFFER_BONUS_LEGACY")
+                or os.environ.get("GAFFER_BONUS_LEGACY_" + name))
+
+
+def _conceded_given_not_clean_cdf(lam: float) -> np.ndarray:
+    """CDF of goals conceded given at least one, under Poisson(lam).
+
+    The clean sheet is drawn from the *team model's* probability rather than
+    from ``exp(-lam)`` - defending.py knows more than a bare Poisson - so the
+    conceded count has to be drawn from the complementary branch, conditioned on
+    being at least one. Mirrors ``xp._conditional_conceded_cdf``.
+    """
+    lam = max(float(lam), 1e-6)
+    pmf = np.array([stats.poisson_pmf(k, lam) for k in range(1, _MAX_CONCEDED + 1)])
+    total = float(pmf.sum())
+    if total <= 0:
+        return np.ones(_MAX_CONCEDED)
+    return np.cumsum(pmf / total)
+
+
+def _award_bonus_with_ties(bps: np.ndarray) -> np.ndarray:
+    """FPL's real bonus allocation, applied per simulated draw.
+
+    BPS is an integer, and FPL's tie rule is not "split the points" - it is
+    "everyone tied gets the higher award, and the awards below are pushed down
+    by however many players took it". Two tied on top take 3 each and the next
+    player takes 1; three tied on top take 3 each and nothing else is paid; a
+    two-way tie for second pays 3-2-2. So a match pays 6 only when the top three
+    BPS scores are distinct, and 7, 8 or 9 otherwise. Over 2025/26: 268 fixtures
+    paid 6, 91 paid 7, 15 paid 8, 6 paid 9, mean 6.366.
+
+    That 6% is not a rounding detail, it is the model's entire bonus level
+    error. A ranker built on continuous normals can never produce a tie, so it
+    pays exactly 6.0 every time and under-projects every player's bonus by the
+    same 6%. Rounding the simulated BPS to the integer it really is puts ties
+    back at their natural rate and the shortfall closes.
+
+    ``bps`` is (iterations, players); the return is the same shape holding
+    0/1/2/3. Verified against 2025/26: replaying the season's *actual* BPS
+    through this function reproduces the awarded bonus to within 2 points in
+    total across all 380 fixtures.
+    """
+    ints = np.rint(bps)
+    top3 = -np.sort(-ints, axis=1)[:, :3]
+    v1 = top3[:, 0:1]
+    v2 = top3[:, 1:2]
+    v3 = top3[:, 2:3]
+    eq1, eq2, eq3 = (ints == v1), (ints == v2), (ints == v3)
+    tie_1st_2 = (v2 == v1) & (v3 != v1)  # exactly two share first
+    only_1st = v2 != v1  # first place is outright
+    award = np.where(eq1, 3.0, 0.0)
+    # Two share first: second place is skipped and the next score takes 1.
+    award = np.where(tie_1st_2 & eq3 & ~eq1, 1.0, award)
+    # First outright: second place is paid, and third only if it is not tied
+    # into second (a two-way tie for second pays 3-2-2, no single point).
+    award = np.where(only_1st & eq2, 2.0, award)
+    award = np.where(only_1st & (v3 != v2) & eq3, 1.0, award)
+    return award
 
 
 def _negbin_variance(mean: float, dispersion: float) -> float:
@@ -398,6 +556,37 @@ def fit_bps_coefficients(
     return fits
 
 
+def reprice(fitted: float, table_2526: float, table_2627: float) -> float:
+    """Re-price one fitted BPS coefficient for a changed entry in FPL's table.
+
+    A fitted coefficient is not the table value. It is the table value plus
+    whatever the event correlates with that the regression cannot see - a
+    keeper's fitted 2.59 BPS per save is the table's 2.0 plus 0.59 of "keepers
+    who make saves also collect other BPS". FPL changed the table; it did not
+    change the correlate. So the table part is re-priced and the correlate rides
+    through untouched::
+
+        nominal   = min(fitted, table_2526)      # can't be more table than the table
+        correlate = fitted - nominal             # >= 0
+        new       = nominal * (table_2627 / table_2526) + correlate
+
+    The ``min`` is what makes this behave in both directions. Where the fit sits
+    *above* the table (keeper saves, 2.59 vs 2.0) the result is additive: the
+    +1.0 rule change lands as +1.0, not as a x1.5 that would also inflate the
+    correlate to 0.89 on no evidence. Where the fit sits *below* the table
+    (goalkeeper CBI, 0.21 vs 0.50 - keepers do not earn the full table rate)
+    there is no correlate to protect and the whole coefficient scales, which is
+    the only sane reading of an attenuated table value; subtracting the full
+    table delta from it would have driven it to 0.04 and all but deleted the
+    term.
+    """
+    if table_2526 <= 0:
+        return fitted
+    nominal = min(fitted, table_2526)
+    correlate = fitted - nominal
+    return nominal * (table_2627 / table_2526) + correlate
+
+
 def _apply_2026_27_adjustments(
     fits: Dict[int, PositionFit],
     p_in_box: float = GK_SAVE_P_IN_BOX,
@@ -409,33 +598,57 @@ def _apply_2026_27_adjustments(
     assumptions; setting both to 0 gives the rule's floor (every save worth
     exactly 2) and both to 1 its ceiling. Returns a record of exactly what was
     applied, for the fit report.
+
+    The table entries are re-priced through :func:`reprice`, which scales only
+    the part of a fitted coefficient the table can account for and carries the
+    correlate through unscaled. Read that function for why; the practical effect
+    is that a keeper save goes to 3.59 BPS rather than the 3.89 a flat x1.5 on
+    the whole coefficient produced, a 0.3 BPS-per-save difference that compounds
+    to 1.8 BPS on a six-save night - enough to move a keeper in or out of the
+    bonus places. The penalty-save patch in this same function was always a flat
+    delta on the fitted value; this makes saves and CBI consistent with it.
     """
-    cbi_ratio = CBI_ACTIONS_PER_BPS_2526 / CBI_ACTIONS_PER_BPS_2627  # 2/3
+    cbi_nominal_2526 = 1.0 / CBI_ACTIONS_PER_BPS_2526
+    cbi_nominal_2627 = 1.0 / CBI_ACTIONS_PER_BPS_2627
+    cbi_delta = cbi_nominal_2627 - cbi_nominal_2526  # -1/6 BPS per action
     save_nominal = GK_SAVE_BASE_2627 + (
         GK_SAVE_BONUS_IN_BOX * p_in_box + GK_SAVE_BONUS_BIG_CHANCE * p_big_chance
     )
-    save_ratio = save_nominal / GK_SAVE_NOMINAL_2526
+    save_delta = save_nominal - GK_SAVE_NOMINAL_2526
     record: Dict[str, Any] = {
-        "cbi_scale": cbi_ratio,
+        "patch_form": "additive: fitted coefficient + (2026/27 table value - "
+        "2025/26 table value), so the fitted correlate is carried through "
+        "unscaled",
+        "cbi_delta": cbi_delta,
         "gk_save_p_in_box": p_in_box,
         "gk_save_p_big_chance": p_big_chance,
         "gk_save_nominal_2526": GK_SAVE_NOMINAL_2526,
         "gk_save_nominal_2627": save_nominal,
-        "gk_save_scale": save_ratio,
-        "gk_save_scale_bounds": [
-            GK_SAVE_BASE_2627 / GK_SAVE_NOMINAL_2526,
+        "gk_save_delta": save_delta,
+        "gk_save_delta_bounds": [
+            GK_SAVE_BASE_2627 - GK_SAVE_NOMINAL_2526,
             (GK_SAVE_BASE_2627 + GK_SAVE_BONUS_IN_BOX + GK_SAVE_BONUS_BIG_CHANCE)
-            / GK_SAVE_NOMINAL_2526,
+            - GK_SAVE_NOMINAL_2526,
         ],
         "penalty_save_delta": PENALTY_SAVE_BPS_DELTA_2627,
         "tackled_removed": "unmodelled",
         "per_position": {},
     }
+    multiplicative = _legacy("PATCH")
     for position, fit in fits.items():
         new = dict(fit.coefficients)
-        new["cbi"] = new.get("cbi", 0.0) * cbi_ratio
-        if new.get("saves", 0.0) > 0:
-            new["saves"] = new["saves"] * save_ratio
+        if multiplicative:  # pragma: no cover - A/B switch only
+            new["cbi"] = new.get("cbi", 0.0) * (cbi_nominal_2627 / cbi_nominal_2526)
+            if new.get("saves", 0.0) > 0:
+                new["saves"] = new["saves"] * (save_nominal / GK_SAVE_NOMINAL_2526)
+        else:
+            new["cbi"] = max(
+                0.0, reprice(new.get("cbi", 0.0), cbi_nominal_2526, cbi_nominal_2627)
+            )
+            if new.get("saves", 0.0) > 0:
+                new["saves"] = max(
+                    0.0, reprice(new["saves"], GK_SAVE_NOMINAL_2526, save_nominal)
+                )
         if new.get("penalties_saved", 0.0) > 0:
             new["penalties_saved"] = max(
                 0.0, new["penalties_saved"] + PENALTY_SAVE_BPS_DELTA_2627
@@ -743,6 +956,8 @@ class BonusModel:
         self.state: Optional[Any] = None
         self._sd_cache: Dict[int, float] = {}
         self._bps_cache: Dict[int, float] = {}
+        self._components: Dict[int, BpsComponents] = {}
+        self._rank_cache: Dict[int, Dict[int, Tuple[float, float, float]]] = {}
         self._positions: Dict[int, int] = {}
         self._by_team: Dict[int, List[int]] = {}
 
@@ -824,6 +1039,8 @@ class BonusModel:
         )
         self._sd_cache.clear()
         self._bps_cache.clear()
+        self._components.clear()
+        self._rank_cache.clear()
         return self.adjustments
 
     def refit_from_current_season(
@@ -891,6 +1108,8 @@ class BonusModel:
         self._build_player_rates(state)
         self._sd_cache.clear()
         self._bps_cache.clear()
+        self._components.clear()
+        self._rank_cache.clear()
         if write_report:
             self.write_report()
         return {
@@ -1013,15 +1232,18 @@ class BonusModel:
                 "per-save value on [2.0, 4.0]." % (GK_SAVE_P_IN_BOX, GK_SAVE_P_BIG_CHANCE),
                 "gk_save_marginal_diagnostic measures what a save was actually "
                 "worth in the source season. If it sits well above "
-                "GK_SAVE_NOMINAL_2526 (%.1f), the 2026/27 save uplift of x%.2f "
-                "is too aggressive and keeper bonus here is over-projected."
+                "GK_SAVE_NOMINAL_2526 (%.1f) then FPL's own table understated "
+                "the real value, and the +%.2f BPS added per save here is on "
+                "top of a coefficient that was already generous."
                 % (GK_SAVE_NOMINAL_2526,
-                   (GK_SAVE_BASE_2627 + GK_SAVE_P_IN_BOX + GK_SAVE_P_BIG_CHANCE)
-                   / GK_SAVE_NOMINAL_2526),
-                "Per-fixture expected bonus is capped at 6.0. Real FPL pays more "
-                "when BPS ties (observed 2025/26 mean 6.37, max 9); the model's "
-                "continuous noise makes ties measure-zero, so 6.0 is a "
-                "deliberate floor-of-reality, never an over-estimate.",
+                   GK_SAVE_BASE_2627 + GK_SAVE_P_IN_BOX + GK_SAVE_P_BIG_CHANCE
+                   - GK_SAVE_NOMINAL_2526),
+                "Per-fixture expected bonus is the simulated pot, not a flat "
+                "6.0: BPS is drawn as an integer and FPL's tie rules are "
+                "applied, so ties pay 7, 8 or 9 at the rate they arise "
+                "(2025/26 actual: mean 6.366, max 9). BONUS_POT_SANITY_LIMIT "
+                "(%.1f) guards the sampler; it is not a rule of the game."
+                % BONUS_POT_SANITY_LIMIT,
             ],
             "warnings": self.warnings,
         }
@@ -1239,6 +1461,7 @@ class BonusModel:
         events.p_60 = _clip01(p_60_uncond / p_a)
         share = (xmins / 90.0) / p_a if p_a > 0 else 0.0
         share = max(0.0, min(1.3, share))
+        events.minutes_share = share
 
         def per90(name: str) -> float:
             return _finite(rates.get(name, baseline.get(name, 0.0)))
@@ -1259,7 +1482,8 @@ class BonusModel:
         cs = supplied("p_clean_sheet", "clean_sheet")
         if cs is None:
             cs = stats.p_clean_sheet(lam_conceded)
-        events.clean_sheet = _clip01(cs) * events.p_60
+        events.p_clean_sheet_match = _clip01(cs)
+        events.clean_sheet = events.p_clean_sheet_match * events.p_60
 
         saves = supplied("lambda_saves", "saves")
         if position == scoring.GKP:
@@ -1313,6 +1537,12 @@ class BonusModel:
         cannot see (passes, key passes, big chances, dribbles, fouls). A missed
         appearance is folded in as a mixture with a point mass at zero, which is
         what lets a bench player retain a small, honest chance of stealing bonus.
+
+        As a side effect this caches a :class:`BpsComponents` record per player -
+        the same pieces, before they are collapsed into two numbers - which is
+        what ``project_bonus`` simulates. Cached rather than returned so that
+        every existing caller keeps working unchanged; ``bps_sd`` already used
+        this pattern.
         """
         pid, position = self._resolve_player(player)
         fit = self.fits.get(position)
@@ -1327,27 +1557,66 @@ class BonusModel:
             mu_cond += weights.get(feature, 0.0) * value
 
         dispersion = self.dispersion.get(position, {})
-        var_cond = fit.resid_sd ** 2
-        # Bernoulli minutes bucket: 1-59 vs 60+, a single coin flip between two
-        # weights, so the variance is (w60 - w159)^2 * p(1-p).
-        p60 = _clip01(events.p_60)
-        var_cond += (weights.get("mins_60", 0.0) - weights.get("mins_1_59", 0.0)) ** 2 * p60 * (1 - p60)
-        var_cond += weights.get("goals", 0.0) ** 2 * max(0.0, events.goals)
-        var_cond += weights.get("assists", 0.0) ** 2 * max(0.0, events.assists)
-        p_cs = _clip01(events.clean_sheet)
-        var_cond += weights.get("clean_sheet", 0.0) ** 2 * p_cs * (1 - p_cs)
+        w_159 = weights.get("mins_1_59", 0.0)
+        w_60 = weights.get("mins_60", 0.0)
+        w_goals = weights.get("goals", 0.0)
+        w_assists = weights.get("assists", 0.0)
+        w_cs = weights.get("clean_sheet", 0.0)
+        w_gc = weights.get("goals_conceded_pairs", 0.0)
+
+        # `var_other` is the variance of everything the fixture simulator does
+        # *not* draw explicitly: the regression residual (passes, key passes,
+        # big chances, dribbles, fouls - all real BPS, none of them projected),
+        # the negative-binomial defensive counts, and the cards.
+        #
+        # The residual is fitted across played matches, which are mostly full
+        # ones, so charging a 15-minute cameo the same BPS noise as a 90-minute
+        # starter is wrong by a factor of two to four - and now that appearance
+        # is drawn as a Bernoulli rather than folded into the mean, that noise
+        # goes straight into a fringe player's chance of stealing the bonus.
+        # The unobserved BPS accrues through the match, so its variance scales
+        # with minutes; measured on 2025/26 the residual sd across the 1-15,
+        # 15-30, 30-60 and 60-80 minute bands tracks sqrt(minutes/90) closely
+        # (MID 0.35/0.52/0.65/0.88 measured against 0.28/0.49/0.70/0.88).
+        minutes_share = 1.0 if _legacy("RESID") else max(
+            0.0, min(1.0, _finite(events.minutes_share, 1.0)))
+        var_other = (fit.resid_sd ** 2) * minutes_share
         for action in COUNT_EVENTS:
             mean = max(0.0, getattr(events, action))
-            var_cond += weights.get(action, 0.0) ** 2 * _negbin_variance(
+            var_other += weights.get(action, 0.0) ** 2 * _negbin_variance(
                 mean, dispersion.get(action, 1e6)
             )
-        var_cond += weights.get("goals_conceded_pairs", 0.0) ** 2 * _var_conceded_pairs(
-            events.lambda_conceded
-        )
         p_y = _clip01(events.yellow_cards)
-        var_cond += weights.get("yellow_cards", 0.0) ** 2 * p_y * (1 - p_y)
+        var_other += weights.get("yellow_cards", 0.0) ** 2 * p_y * (1 - p_y)
         p_r = _clip01(events.red_cards)
-        var_cond += weights.get("red_cards", 0.0) ** 2 * p_r * (1 - p_r)
+        var_other += weights.get("red_cards", 0.0) ** 2 * p_r * (1 - p_r)
+
+        # Bernoulli minutes bucket: 1-59 vs 60+, a single coin flip between two
+        # weights. The clean-sheet term rides on the *same* flip - only a player
+        # who reaches 60 earns it - so the two are not independent and the
+        # covariance belongs in the total. Writing T = V*((w60 - w159) + w_cs*C)
+        # with V ~ Bern(p60) and C ~ Bern(p_cs_match) independent gives Var(T)
+        # in closed form, which is exactly what the simulator draws.
+        p60 = _clip01(events.p_60)
+        p_cs_match = _clip01(events.p_clean_sheet_match)
+        delta = w_60 - w_159
+        if _legacy("RESID"):
+            p_cs_gated = _clip01(events.clean_sheet)
+            var_minutes_cs = (
+                delta * delta * p60 * (1 - p60)
+                + w_cs * w_cs * p_cs_gated * (1 - p_cs_gated)
+            )
+        else:
+            e_t = p60 * (delta + w_cs * p_cs_match)
+            e_t2 = p60 * (
+                delta * delta + 2.0 * delta * w_cs * p_cs_match + w_cs * w_cs * p_cs_match
+            )
+            var_minutes_cs = max(0.0, e_t2 - e_t * e_t)
+
+        var_cond = var_other + var_minutes_cs
+        var_cond += w_goals ** 2 * max(0.0, events.goals)
+        var_cond += w_assists ** 2 * max(0.0, events.assists)
+        var_cond += w_gc ** 2 * _var_conceded_pairs(events.lambda_conceded)
 
         p_a = _clip01(events.p_appear)
         mu = p_a * mu_cond
@@ -1357,7 +1626,51 @@ class BonusModel:
         sd = max(_finite(sd, 1.0), 0.5)
         self._bps_cache[pid] = mu
         self._sd_cache[pid] = sd
+
+        # Everything the simulator does not draw explicitly, as a mean.
+        mu_other = mu_cond - (
+            w_159 * counts["mins_1_59"]
+            + w_60 * counts["mins_60"]
+            + w_goals * events.goals
+            + w_assists * events.assists
+            + w_cs * events.clean_sheet
+            + w_gc * events.goals_conceded_pairs
+        )
+        self._components[pid] = BpsComponents(
+            player_id=pid,
+            team_id=self._team_of(player, pid),
+            fixture_id=self._fixture_id_of(fixture_ctx),
+            position=position,
+            p_appear=p_a,
+            p_60=p60,
+            p_clean_sheet=p_cs_match,
+            lambda_conceded=max(0.0, _finite(events.lambda_conceded)),
+            lambda_goals=max(0.0, _finite(events.goals)),
+            lambda_assists=max(0.0, _finite(events.assists)),
+            w_mins_1_59=w_159,
+            w_mins_60=w_60,
+            w_goals=w_goals,
+            w_assists=w_assists,
+            w_clean_sheet=w_cs,
+            w_conceded_pairs=w_gc,
+            mu_other=_finite(mu_other),
+            var_other=max(_finite(var_other), 1e-6),
+            mu_cond=_finite(mu_cond),
+        )
         return mu, sd
+
+    def _team_of(self, player: Any, pid: int) -> int:
+        team = getattr(player, "team_id", None)
+        if team is None and self.state is not None:
+            entry = getattr(self.state, "players", {}).get(pid)
+            team = getattr(entry, "team_id", None)
+        return int(team) if team is not None else -1
+
+    @staticmethod
+    def _fixture_id_of(fixture_ctx: Any) -> Optional[int]:
+        fixture = BonusModel._ctx_value(fixture_ctx, "fixture")
+        fid = getattr(fixture, "id", None)
+        return int(fid) if fid is not None else None
 
     def project_bps(
         self, player: Any, fixture_ctx: Any = None, projections: Any = None
@@ -1376,6 +1689,202 @@ class BonusModel:
 
     # -- bonus --------------------------------------------------------------
 
+    def _fixture_components(
+        self, fixture_id: int, ids: Sequence[int]
+    ) -> Optional[List[BpsComponents]]:
+        """The component records for this fixture, or None if any is missing.
+
+        Components are cached by player id as a side effect of
+        ``project_bps_and_sd``, exactly as ``bps_sd`` already caches the
+        standard deviation. They are only usable if every candidate has one and
+        every one of them was built for *this* fixture - otherwise a stale
+        record from an earlier fixture (a double gameweek, or a caller that
+        assembled the list by hand) would be silently simulated as if it were
+        current, so the Gaussian path is used instead.
+        """
+        out: List[BpsComponents] = []
+        for pid in ids:
+            comp = self._components.get(pid)
+            if comp is None or comp.fixture_id is None or comp.fixture_id != int(fixture_id):
+                return None
+            # Without a club the clean sheet cannot be shared correctly, and
+            # pooling the unknowns into one pseudo-team would correlate players
+            # across both sides of the match. Fall back instead.
+            if comp.team_id < 0:
+                return None
+            out.append(comp)
+        return out
+
+    def _simulate_ranks(
+        self,
+        fixture_id: int,
+        ids: Sequence[int],
+        scores: Dict[int, float],
+        sigma: Dict[int, float],
+        iterations: int,
+        seed: int,
+    ) -> Dict[int, List[float]]:
+        """P(3 bonus)/P(2 bonus)/P(1 bonus), from a fixture-level event simulation.
+
+        Tiers, not ranks. With ties two players can both take 3, so "P(finishes
+        second on BPS)" and "P(is awarded 2 bonus)" are different numbers and it
+        is the second one every caller actually wants: expected bonus is exactly
+        ``3*p3 + 2*p2 + p1`` and the second moment exactly ``9*p3 + 4*p2 + p1``.
+        Without ties they coincide, which is why the fallback path below can
+        return rank probabilities unchanged.
+
+        The old ranker drew each player's BPS from an independent normal centred
+        on his projection. Three things are wrong with that and all three bite
+        exactly where bonus decides a captaincy call:
+
+        * **A clean sheet is one event, not eleven.** The clean-sheet weight is
+          the largest single term a defender or keeper carries (~15.7 BPS on the
+          2025/26 fit, against ~4.0 of residual noise). Drawing it independently
+          per player means the model spends most of its draws in worlds where
+          two of a back four kept a clean sheet and the other two did not, which
+          never happens. Here one Bernoulli is drawn per *team* per draw, gated
+          per player by his own 60-minute flip, and the goals-conceded count is
+          drawn from the complementary branch so a conceded goal docks the whole
+          back line together.
+        * **A goal is a lump, not a wobble.** Goals enter the Gaussian ranker as
+          extra variance, which is symmetric; the real distribution is Poisson
+          with a 12-24 BPS step. For a forward on 0.5 expected goals the normal
+          puts ~2% above two sigma where the Poisson mixture puts ~9% - the
+          model was systematically under-rating the chance a striker takes the
+          three. Goals and assists are drawn as Poisson counts here.
+        * **Not appearing is a point mass, not a wider normal.** Folding the
+          appearance probability into the mean and variance of a single normal
+          gives a rotation risk on p_appear 0.5 a fat symmetric tail he does not
+          have: a two-stage Bernoulli-then-normal draw is what he actually
+          faces, and the bonus that frees up belongs to the nailed starters.
+
+        Falls back to the plain independent-normal ranker whenever the component
+        records are unavailable (a hand-built candidate list, ``backtest_bonus``
+        replaying observed counts, the degenerate cases in ``self_test``).
+        """
+        components = self._fixture_components(fixture_id, ids)
+        if _legacy("RANKER"):
+            components = None
+        if components is None or len(ids) < 3:
+            return stats.top_k_probabilities(
+                scores, sigma, k=3, iterations=iterations, seed=seed
+            )
+
+        n = len(ids)
+        rng = np.random.default_rng(seed)
+
+        p_appear = np.array([c.p_appear for c in components])
+        p_60 = np.array([c.p_60 for c in components])
+        lam_goals = np.maximum(np.array([c.lambda_goals for c in components]), 0.0)
+        lam_assists = np.maximum(np.array([c.lambda_assists for c in components]), 0.0)
+        w_159 = np.array([c.w_mins_1_59 for c in components])
+        w_60 = np.array([c.w_mins_60 for c in components])
+        w_goals = np.array([c.w_goals for c in components])
+        w_assists = np.array([c.w_assists for c in components])
+        w_cs = np.array([c.w_clean_sheet for c in components])
+        w_gc = np.array([c.w_conceded_pairs for c in components])
+        mu_other = np.array([c.mu_other for c in components])
+        sd_other = np.sqrt(np.maximum(np.array([c.var_other for c in components]), 1e-9))
+
+        # --- shared team draws ---------------------------------------------
+        teams = np.array([c.team_id for c in components])
+        unique_teams = np.unique(teams)
+        clean = np.zeros((iterations, n), dtype=bool)
+        pairs = np.zeros((iterations, n))
+        team_p_cs = np.zeros(n)
+        mean_pairs = np.zeros(n)
+        for team in unique_teams:
+            col = np.flatnonzero(teams == team)
+            # One clean-sheet probability and one conceded rate per team: take
+            # the median across the squad rather than any single player's, so a
+            # stray default cannot swing the whole side.
+            p_cs = float(np.median([components[i].p_clean_sheet for i in col]))
+            lam = float(np.median([components[i].lambda_conceded for i in col]))
+            cs_draw = rng.random(iterations) < p_cs
+            cdf = _conceded_given_not_clean_cdf(lam)
+            conceded = 1 + np.searchsorted(cdf, rng.random(iterations))
+            conceded = np.where(cs_draw, 0, np.minimum(conceded, _MAX_CONCEDED))
+            clean[:, col] = cs_draw[:, None]
+            pairs[:, col] = (conceded // 2)[:, None].astype(float)
+            team_p_cs[col] = p_cs
+            mean_pairs[col] = float((conceded // 2).mean())
+
+        # --- per-player draws ------------------------------------------------
+        appeared = rng.random((iterations, n)) < p_appear
+        long60 = rng.random((iterations, n)) < p_60
+        goals = rng.poisson(np.broadcast_to(lam_goals, (iterations, n)))
+        assists = rng.poisson(np.broadcast_to(lam_assists, (iterations, n)))
+        noise = rng.normal(0.0, 1.0, size=(iterations, n)) * sd_other
+
+        # Re-centre on the projected mean. The draws above imply their own
+        # conditional mean, which differs from ``mu_cond`` by the little the
+        # clean-sheet branch moves the conceded distribution - and, if a caller
+        # perturbed the BPS it passed in, by that perturbation as well. Without
+        # this the simulator would quietly ignore its ``candidates`` argument.
+        implied = (
+            mu_other
+            + w_159 + (w_60 - w_159) * p_60
+            + w_goals * lam_goals
+            + w_assists * lam_assists
+            + w_cs * team_p_cs * p_60
+            + w_gc * mean_pairs
+        )
+        wanted = np.array(
+            [
+                (scores[pid] / c.p_appear) if c.p_appear > 0.02 else c.mu_cond
+                for pid, c in zip(ids, components)
+            ]
+        )
+        offset = wanted - implied
+
+        bps = (
+            mu_other
+            + offset
+            + np.where(long60, w_60, w_159)
+            + w_goals * goals
+            + w_assists * assists
+            + w_cs * (clean & long60)
+            + w_gc * pairs
+            + noise
+        )
+        # A player who does not take the field records no BPS and cannot place.
+        # A hard sentinel rather than 0.0 so he can never edge out a genuine
+        # candidate who happened to draw a negative BPS; the per-column offset
+        # keeps the absentees from tying with each other under the tie rules.
+        bps = np.where(appeared, bps, -1e9 - np.arange(n, dtype=float))
+
+        if _legacy("TIES"):
+            order = np.argsort(-bps, axis=1)
+            result: Dict[int, List[float]] = {pid: [0.0, 0.0, 0.0] for pid in ids}
+            for rank in range(min(3, n)):
+                counts = np.bincount(order[:, rank], minlength=n)
+                for idx, pid in enumerate(ids):
+                    result[pid][rank] = counts[idx] / float(iterations)
+            return result
+
+        award = _award_bonus_with_ties(bps)
+        return {
+            pid: [
+                float(np.count_nonzero(award[:, idx] == 3)) / iterations,
+                float(np.count_nonzero(award[:, idx] == 2)) / iterations,
+                float(np.count_nonzero(award[:, idx] == 1)) / iterations,
+            ]
+            for idx, pid in enumerate(ids)
+        }
+
+    def rank_probabilities(
+        self, fixture_id: int
+    ) -> Optional[Dict[int, Tuple[float, float, float]]]:
+        """P(3)/P(2)/P(1) bonus from the last ``project_bonus`` for this fixture.
+
+        The ranker is a fixture-level event simulation, not a closed form, so it
+        cannot be reproduced by re-running a different sampler on the same means
+        and standard deviations. Callers that need the full tier vector (xp.py
+        wants the second moment and a bonus tier per Monte-Carlo draw) read it
+        from here instead of simulating their own.
+        """
+        return self._rank_cache.get(int(fixture_id))
+
     def project_bonus(
         self,
         fixture_id: int,
@@ -1390,13 +1899,18 @@ class BonusModel:
         player who might appear, from both teams**. Bonus is contested across
         the match, not within a squad.
 
-        Read this before using the result: the simulator awards exactly one
-        1st, 2nd and 3rd place per draw, so the returned values sum to exactly
-        6.0 for *any* candidate list of three or more. An incomplete list does
-        not return less bonus - it **redistributes** the missing players' share
-        onto the ones you did pass, which is the single easiest way to inflate
-        every projection in the app. ``candidates_for_fixture`` builds the full
-        list; use it unless you have a reason not to.
+        Read this before using the result: the simulator pays out the full
+        3-2-1 in every draw, so the returned values sum to the fixture's whole
+        bonus pot for *any* candidate list of three or more. An incomplete list
+        does not return less bonus - it **redistributes** the missing players'
+        share onto the ones you did pass, which is the single easiest way to
+        inflate every projection in the app. ``candidates_for_fixture`` builds
+        the full list; use it unless you have a reason not to.
+
+        The pot is 6.0 only when the top three BPS scores are distinct. Ties pay
+        more (3-3-1, 3-2-2, 3-3-3), so the expected total is a little over 6 -
+        2025/26 averaged 6.366 - and ``BONUS_POT_SANITY_LIMIT`` rather than 6.0
+        is the invariant. See :func:`_award_bonus_with_ties`.
         """
         if not candidates:
             return {}
@@ -1422,20 +1936,24 @@ class BonusModel:
         # Deterministic per fixture: the same fixture always simulates the same
         # draws, so a re-run of the projection set is bit-identical.
         seed = int(seed if seed is not None else (7 + int(fixture_id)))
-        ranks = stats.top_k_probabilities(scores, sigma, k=3, iterations=iterations, seed=seed)
+        ranks = self._simulate_ranks(fixture_id, ids, scores, sigma, iterations, seed)
+        self._rank_cache[int(fixture_id)] = {
+            pid: (p[0], p[1], p[2]) for pid, p in ranks.items()
+        }
 
         bonus = {
             pid: scoring.expected_bonus_points(p[0], p[1], p[2]) for pid, p in ranks.items()
         }
         total = sum(bonus.values())
-        cap = float(sum(scoring.BONUS_TIERS))
-        if total > cap + 1e-6:
-            # Unreachable with the Monte-Carlo ranker (each draw awards exactly
-            # one 1st, 2nd and 3rd) but the cap is a hard invariant of the game,
-            # so enforce it rather than trust the sampler.
-            factor = cap / total
+        if total > BONUS_POT_SANITY_LIMIT + 1e-6:
+            # Not reachable from the sampler - the worst tie a fixture can throw
+            # is far below this - so hitting it means the ranker is broken, and
+            # a broken ranker must not silently inflate every projection.
+            factor = BONUS_POT_SANITY_LIMIT / total
             bonus = {pid: value * factor for pid, value in bonus.items()}
-            log.warning("fixture %s: bonus sum %.4f rescaled to %.1f", fixture_id, total, cap)
+            log.warning(
+                "fixture %s: bonus sum %.4f exceeds the sanity limit %.1f and was rescaled",
+                fixture_id, total, BONUS_POT_SANITY_LIMIT)
         return bonus
 
     # -- convenience --------------------------------------------------------
@@ -1607,7 +2125,8 @@ def self_test(model: BonusModel, state: Any, fixtures: Sequence[Fixture],
               forecasts: Optional[Mapping[int, Any]] = None) -> List[str]:
     """Assert every invariant this module must never break."""
     checks: List[str] = []
-    cap = float(sum(scoring.BONUS_TIERS))
+    base_pot = float(sum(scoring.BONUS_TIERS))
+    pots: List[float] = []
 
     for fixture in fixtures:
         forecast = forecasts.get(fixture.id) if forecasts else None
@@ -1618,38 +2137,46 @@ def self_test(model: BonusModel, state: Any, fixtures: Sequence[Fixture],
             assert sds[pid] > 0 and sds[pid] == sds[pid], "bad sd for player %d" % pid
         bonus = model.project_bonus(fixture.id, bps, sds=sds)
         total = sum(bonus.values())
+        pots.append(total)
         assert all(v == v for v in bonus.values()), "NaN bonus in fixture %d" % fixture.id
         assert all(v >= -1e-12 for v in bonus.values()), "negative bonus in fixture %d" % fixture.id
-        assert total <= cap + 1e-6, "fixture %d: bonus sums to %.6f > %.1f" % (
-            fixture.id,
-            total,
-            cap,
+        assert total <= BONUS_POT_SANITY_LIMIT + 1e-6, (
+            "fixture %d: bonus sums to %.6f > the sanity limit %.1f"
+            % (fixture.id, total, BONUS_POT_SANITY_LIMIT)
         )
-        assert total > cap - 1e-6, (
-            "fixture %d: full candidate list sums to %.6f, expected exactly %.1f"
-            % (fixture.id, total, cap)
+        assert total > base_pot - 1e-6, (
+            "fixture %d: full candidate list sums to %.6f, which is below the 3+2+1 "
+            "floor - the pot can only be larger than 6, never smaller"
+            % (fixture.id, total)
         )
+    mean_pot = sum(pots) / max(len(pots), 1)
+    # 2025/26 paid 6.366 per fixture on average. The simulated pot comes from
+    # integer BPS ties arising on their own, so it is a genuine test of the tie
+    # model rather than a fitted constant; anything outside this band means the
+    # simulated BPS spread is wrong.
+    assert 6.0 - 1e-6 <= mean_pot <= 7.0, "mean bonus pot %.4f is not credible" % mean_pot
     checks.append(
-        "%d fixtures: >=22 candidates, no NaN, expected bonus sums to exactly 6.0" % len(fixtures)
+        "%d fixtures: >=22 candidates, no NaN, bonus pot mean %.4f (2025/26 actual "
+        "6.366), all within [6.0, %.1f]" % (len(fixtures), mean_pot, BONUS_POT_SANITY_LIMIT)
     )
 
-    # A short candidate list still conserves 6.0 - it redistributes rather than
-    # shrinks. Pin that down so nobody later "optimises" by passing a top-N.
+    # A short candidate list still pays out the whole pot - it redistributes
+    # rather than shrinks. Pin that down so nobody "optimises" with a top-N.
     fixture = fixtures[0]
     bps, sds = model.candidates_for_fixture(state, fixture, forecasts.get(fixture.id) if forecasts else None)
     full = model.project_bonus(fixture.id, bps, sds=sds)
     top = dict(sorted(bps.items(), key=lambda kv: -kv[1])[:5])
     subset = model.project_bonus(fixture.id, top, sds=sds)
-    assert sum(subset.values()) <= cap + 1e-6
+    assert sum(subset.values()) <= BONUS_POT_SANITY_LIMIT + 1e-6
     best = max(top, key=lambda k: top[k])
     assert subset[best] > full[best], "a short list must over-allocate, not under-allocate"
     checks.append(
-        "top-5 subset also sums to %.3f and inflates the leader %.3f -> %.3f "
+        "top-5 subset also pays %.3f and inflates the leader %.3f -> %.3f "
         "(conservation is why the full list is mandatory)"
         % (sum(subset.values()), full[best], subset[best])
     )
 
-    # Degenerate candidate lists must not blow up or exceed the cap.
+    # Degenerate candidate lists must not blow up or exceed the sanity limit.
     assert model.project_bonus(1, {}) == {}
     two = model.project_bonus(1, {101: 30.0, 102: 20.0}, sds={101: 5.0, 102: 5.0})
     assert sum(two.values()) <= 5.0 + 1e-6, sum(two.values())
@@ -1770,7 +2297,7 @@ if __name__ == "__main__":
         print("  %-20s %-4s %-4s %8.2f %7.2f %8.4f"
               % (p.web_name[:20], game.short_name(p.team_id), game.position_name(pid),
                  cand_bps[pid], cand_sd[pid], cand_bonus[pid]))
-    print("  %-20s %-4s %-4s %8s %7s %8.4f  <- must be <= 6.0"
+    print("  %-20s %-4s %-4s %8s %7s %8.4f  <- the pot: 6 plus whatever BPS ties pay"
           % ("SUM", "", "", "", "", sum(cand_bonus.values())))
 
     print("\n=== GW%d: expected bonus, all %d fixtures ===" % (gw, len(gw_fixtures)))
@@ -1798,17 +2325,17 @@ if __name__ == "__main__":
           "matches, clean sheet and goals conceded controlled)"
           % (bonus_model.source_season, diag["marginal_bps_per_save"], diag["std_error"],
              diag["n"]))
-    print("  The uplift below divides by an assumed 2025/26 nominal of %.1f. The diagnostic "
-          "says a save was really worth ~%.1f, so if the official table already paid more "
-          "than 2, this model over-projects keeper bonus by roughly x%.2f. Re-check against "
-          "GW1-5 actuals before trusting keeper bonus."
-          % (GK_SAVE_NOMINAL_2526, diag["marginal_bps_per_save"],
-             diag["marginal_bps_per_save"] / GK_SAVE_NOMINAL_2526))
+    print("  The patch adds (2026/27 table - 2025/26 table of %.1f) BPS per save. The "
+          "diagnostic says a save was really worth ~%.2f in %s, i.e. the table understated "
+          "it by ~%.2f, so the fitted coefficient this is added to is already generous. "
+          "Re-check against GW1-5 actuals before trusting keeper bonus."
+          % (GK_SAVE_NOMINAL_2526, diag["marginal_bps_per_save"], bonus_model.source_season,
+             diag["marginal_bps_per_save"] - GK_SAVE_NOMINAL_2526))
     keepers = [pid for pid in all_bonus if game.player(pid).position == scoring.GKP]
     keepers.sort(key=lambda p: -all_bonus[p])
-    base_scale = bonus_model.adjustments["gk_save_scale"]
-    print("  nominal per-save BPS 2026/27 = %.2f (scale %.2f on the fitted %.2f)"
-          % (bonus_model.adjustments["gk_save_nominal_2627"], base_scale,
+    print("  nominal per-save BPS 2026/27 = %.2f (+%.2f on the fitted %.2f)"
+          % (bonus_model.adjustments["gk_save_nominal_2627"],
+             bonus_model.adjustments["gk_save_delta"],
              bonus_model.fits[scoring.GKP].coefficients["saves"]))
     top_keepers = keepers[:5]
     scenarios = (("floor 2.0", 0.0, 0.0), ("default 3.0", GK_SAVE_P_IN_BOX,

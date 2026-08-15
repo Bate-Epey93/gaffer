@@ -151,13 +151,22 @@ def score_predictor(
     # different (and much easier) question than "who do I own this week".
     per_gw_spearman: List[float] = []
     per_gw_hit: List[float] = []
-    for _, grp in sub.groupby(gw_col):
+    ranked_gws: List[int] = []
+    for gw_value, grp in sub.groupby(gw_col):
         if len(grp) < 2:
             continue
+        ranked_gws.append(int(gw_value))
         per_gw_spearman.append(spearman(grp[pred_col], grp[actual_col]))
         per_gw_hit.append(hit_rate_top_n(grp[pred_col], grp[actual_col], top_n))
     good = [v for v in per_gw_spearman if v == v]
     out["spearman_per_gw_mean"] = float(np.mean(good)) if good else float("nan")
+    # The gameweek-by-gameweek series, not just its mean. Any change justified
+    # on a single season needs a crude holdout, and the cheapest honest one is
+    # first half of the season against second half; that split cannot be taken
+    # from a pooled average.
+    out["spearman_per_gw"] = [
+        [g, (round(v, 6) if v == v else None)] for g, v in zip(ranked_gws, per_gw_spearman)
+    ]
     # A predictor that is undefined in a gameweek (last gameweek's points at
     # GW1 is a column of zeros) contributes no rank correlation there, so the
     # per-gameweek mean covers fewer gameweeks. Report it or the comparison is

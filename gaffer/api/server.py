@@ -1297,6 +1297,18 @@ def create_app(config: Optional[Config] = None, horizon: Optional[int] = None) -
     ) -> Dict[str, Any]:
         snapshot = STORE.get()
         state = snapshot.state
+        # Validate before doing any work. Without this an out-of-horizon gw
+        # produced a structurally valid payload in which every xP was 0.0 and
+        # the lineup had been picked off those zeros — silently wrong is worse
+        # than a 400, and every sibling endpoint already 400s here.
+        gw = int(gw or state.current_gw)
+        if gw not in snapshot.gws:
+            raise HTTPException(
+                status_code=400,
+                detail="GW%d is outside the projected range %d-%d; "
+                       "POST /api/refresh with a larger horizon"
+                       % (gw, snapshot.gws[0], snapshot.gws[-1]),
+            )
         entry_id = entry_id or STORE.config.entry_id
         if entry_id is None:
             squad, source = _fallback_squad(snapshot)
@@ -1305,8 +1317,11 @@ def create_app(config: Optional[Config] = None, horizon: Optional[int] = None) -
             squad, meta = load_squad_state(int(entry_id), gw)
             source = "entry"
 
-        gw = int(gw or state.current_gw)
         out = squad_dict(state, squad)
+        # `gw` is the gameweek the xP figures below are for; the squad itself
+        # may have been loaded from an earlier one.
+        out["squad_gw"] = out["gw"]
+        out["gw"] = gw
         out["source"] = source
         out["meta"] = _clean(meta)
         ids = squad.player_ids()
@@ -1458,9 +1473,18 @@ def create_app(config: Optional[Config] = None, horizon: Optional[int] = None) -
             ids = [int(p) for p in squad.split(",") if p.strip()]
             source = "query"
         elif entry_id is not None:
-            squad_state, _meta = load_squad_state(int(entry_id), gw)
-            ids = squad_state.player_ids()
-            source = "entry"
+            # An entry with no published picks yet — which is every entry until
+            # the GW1 deadline — must not kill this endpoint. /api/chips and
+            # /api/optimize already fall back to the recommended fifteen here.
+            try:
+                squad_state, _meta = load_squad_state(int(entry_id), gw)
+                ids = squad_state.player_ids()
+                source = "entry"
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                squad_state, source = _fallback_squad(snapshot)
+                ids = squad_state.player_ids()
         else:
             squad_state, source = _fallback_squad(snapshot)
             ids = squad_state.player_ids()

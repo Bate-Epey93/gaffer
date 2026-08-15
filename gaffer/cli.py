@@ -18,6 +18,7 @@ import math
 import os
 import subprocess
 import sys
+import textwrap
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -35,6 +36,7 @@ from gaffer.core.types import (
 from gaffer.data.cache import Cache
 from gaffer.data.fpl_api import FPLClient, FPLError, FPLNotFound
 from gaffer.data.loaders import GameState, load_game_state
+from gaffer.model import bonus as bonus_model
 from gaffer.model.xp import XPEngine, projections_cache_path
 
 DEFAULT_PORT = 8770
@@ -831,8 +833,17 @@ def cmd_backtest(args: argparse.Namespace, ctx: Context) -> int:
         align="lr",
     ))
 
-    predictors = report.get("predictors") or {}
-    if predictors:
+    # One table per subset, decision-relevant ones first. A user who only sees
+    # the full universe sees the table that is dominated by players who never
+    # play, which is the one table nothing should be concluded from.
+    subsets = report.get("subsets") or [
+        {"key": "full_universe", "label": "every player with a fixture",
+         "predictors_key": "predictors", "judged": False, "note": ""},
+    ]
+    for subset in subsets:
+        predictors = report.get(subset.get("predictors_key")) or {}
+        if not predictors:
+            continue
         rows = []
         for key, entry in predictors.items():
             captain = entry.get("captain") or {}
@@ -848,9 +859,17 @@ def cmd_backtest(args: argparse.Namespace, ctx: Context) -> int:
                 f2(captain.get("top10_rate"), "%.3f"),
                 f2(captain.get("mean_points_lost"), "%.2f"),
             ])
-        print("\n" + render_table(
+        print("\n%s — %s (%s rows, %s gameweeks)"
+              % ("JUDGED" if subset.get("judged") else "DIAGNOSTIC",
+                 subset.get("label", subset.get("key", "")),
+                 subset.get("rows", "?"), subset.get("gameweeks", "?")))
+        for line in textwrap.wrap(subset.get("note", ""), width=96):
+            print("  " + line)
+        print(render_table(
             ["predictor", "RMSE", "MAE", "rho", "rho/GW", "top20", "capt top5", "capt top10", "capt lost"],
             rows, align="lrrrrrrrr"))
+
+    predictors = report.get("predictors") or {}
 
     model = predictors.get("model") or {}
     by_position = model.get("by_position") or {}
@@ -867,11 +886,25 @@ def cmd_backtest(args: argparse.Namespace, ctx: Context) -> int:
 
     judgement = report.get("verdict") or {}
     if judgement:
-        print("\nverdict: %s"
-              % ("the model beats every baseline" if judgement.get("beats_all")
-                 else "the model does NOT beat every baseline"))
+        basis = ", ".join(k.replace("_", " ") for k in judgement.get("basis", []))
+        print("\nverdict (judged on %s): %s"
+              % (basis or "no decision-relevant subset",
+                 "the model beats every baseline where the decisions are made"
+                 if judgement.get("beats_all")
+                 else "the model does NOT beat every baseline where the decisions are made"))
         for line in judgement.get("lines", []):
-            print("  - %s" % line)
+            if not line:
+                print()
+                continue
+            own = line[: len(line) - len(line.lstrip())]
+            body = line.strip()
+            # A column-padded line is a table row; wrapping it would split a
+            # number across two lines. Print those as they are.
+            if "  " in body:
+                print("  " + own + body)
+                continue
+            for index, wrapped in enumerate(textwrap.wrap(body, width=96) or [""]):
+                print("  %s%s%s" % (own, "" if index == 0 else "  ", wrapped))
     invariants = report.get("invariants") or {}
     if invariants:
         print("\ninvariants: %s" % ", ".join("%s %s" % (k, v) for k, v in invariants.items()))
@@ -995,8 +1028,13 @@ def cmd_verify(args: argparse.Namespace, ctx: Context) -> int:
           "%d bad fields, e.g. %s" % (len(nan_fields), nan_fields[:3]))
     check("components sum to the gameweek total", bad_sum < 1e-9, "max residual %.2e" % bad_sum)
     check("no negative gameweek totals", not negative, str(negative[:3]))
-    over = {fid: total for fid, total in bonus_by_fixture.items() if total > 6 + 1e-6}
-    check("expected bonus per fixture <= 6", not over,
+    # A fixture pays 3+2+1 = 6 only when the top three BPS scores are distinct.
+    # Ties pay 7, 8 or 9 and 2025/26 averaged 6.366 per fixture, so the check is
+    # against the sanity limit rather than 6: a pot of 6.4 is the game working,
+    # a pot above the limit is the bonus ranker broken.
+    limit = bonus_model.BONUS_POT_SANITY_LIMIT
+    over = {fid: total for fid, total in bonus_by_fixture.items() if total > limit + 1e-6}
+    check("expected bonus per fixture <= %.0f" % limit, not over,
           "%d fixtures over, e.g. %s" % (len(over), list(over.items())[:3]))
     check("projection rows present", rows == len(state.players) * len(gws),
           "%d rows for %d players x %d gws" % (rows, len(state.players), len(gws)))

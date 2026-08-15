@@ -32,6 +32,25 @@ rows, exactly, and is 0 for every goalkeeper row. Two traps follow from that:
    *current* position whenever they exist, fall back to the stored count only
    where they do not, and mark that fall-back as unconfirmed.
 
+How hard to regress a player's own rate
+--------------------------------------
+Two different repeatabilities are in play and they are not interchangeable. For
+the *next match of the season in progress* — which is 37 of the 38 decisions a
+manager makes — the relevant question is how much of the spread in players'
+season-to-date rates is real, and the answer is "most of it": a variance
+components split of the 2025/26 per-match counts leaves a prior worth only
+3.0 (DEF) / 2.4 (MID) / 4.6 (FWD) 90-minute units. Odd-vs-even and random
+split-half correlations of the same rates independently land in the same place.
+
+Between seasons the rate is far less repeatable, because a player changes club,
+manager and role over a summer: the year-on-year correlation implies a prior
+worth 7.6 / 4.6 / 9.5 90s. Regressing a *within-season* rate that hard throws
+away real signal. So the two strengths are carried separately, and a 90 played
+in an earlier season enters as ``shrink_90s / cross_season_90s`` of a 90 played
+this season. That ratio is exactly reliability-preserving: a player whose only
+evidence is last season ends up with precisely the rate the single-strength
+version gave him, and only same-season evidence is treated more sharply.
+
 Fixture polarity
 ----------------
 A team pinned into its own half makes more defensive actions. Fitted
@@ -41,7 +60,28 @@ it is already in the player's own rate), the effect is a multiplier of
 ~0.030 for midfielders. That is small but highly significant for defenders
 (Poisson deviance drop 22.5 on 1 df) and runs *opposite* to the clean sheet: the
 same tough fixture that halves a defender's clean-sheet chance raises his DEFCON
-chance.
+chance. Two richer fixture covariates were tried and both were worse than this
+one on a walk-forward replay of 2025/26: scaling by the opponent's own
+actions-conceded rate (Brier 0.1324 against 0.1313 for tilt alone) and raising
+beta past ~0.06 (0.1316 at 0.10, 0.1355 at 0.25). The fixture channel is small
+because a player's own rate has already absorbed most of it.
+
+Playing away is a real *third* effect that is deliberately **not** modelled here,
+and the measurement is recorded so nobody has to redo it. Defenders make 8.9%
+more defensive actions per 90 away than at home (MID 3.0%, FWD 3.9%); the tilt
+term above explains under half of that, because it reads territory only through
+a ratio of goal rates raised to 0.055. Fitted the same way as tilt — within
+player, Poisson deviance against the leave-one-out rate, on top of the tilt
+multiplier — the residual away multiplier is 1.022 for defenders (deviance drop
+5.3 on 1 df), 1.006 for midfielders (0.3) and 1.028 for forwards (1.0). Applied
+centred (away x sqrt(m), home / sqrt(m), so the league mean cannot move) it
+improves the DEFCON probability itself on a walk-forward replay of 2025/26:
+Brier 0.13033 -> 0.12997, rank correlation with the realised hit 0.4225 ->
+0.4246, in both halves. But it is worth about +-1% on one player's action rate,
+and in a full backtest it moved neither Spearman nor RMSE on any subset while
+costing 0.0014 of the top-20 hit rate. Only defenders reach significance, on the
+single season that also has to serve as the test set. It is not worth a fitted
+parameter on that evidence; revisit once 2026/27 provides a second season.
 """
 from __future__ import annotations
 
@@ -68,7 +108,10 @@ if TYPE_CHECKING:  # avoids a cycle: xp.py imports this module
 log = logging.getLogger(__name__)
 
 FIT_PATH = os.path.join(REPORTS_DIR, "defcon_fit.json")
-FIT_VERSION = 3
+# Bumped from 3: `shrink_90s` changed meaning (it is now the within-season prior
+# strength, not the year-on-year one) and `cross_season_90s` joined it. A v3 file
+# would load silently and regress every same-season rate three times too hard.
+FIT_VERSION = 4
 
 # Fitted 2026-08-14 on the vaastav 2025-26 per-match archive joined to
 # bookmaker-implied fixture lambdas. Offline fallback only; `fit` recomputes.
@@ -81,9 +124,17 @@ FALLBACK = {
     "prior_rate90": {"2": 7.770, "3": 8.386, "4": 4.476},
     "price_log_slope": {"2": 0.430, "3": -0.671, "4": -0.349},
     "price_log_intercept": {"2": 1.322, "3": 3.264, "4": 2.121},
-    # Prior strength in 90-minute units, from the year-on-year reliability of a
-    # player's own rate (DEF rho=0.77, MID 0.84, FWD 0.71 over 157 players).
-    "shrink_90s": {"2": 7.6, "3": 4.6, "4": 9.5},
+    # Prior strength in 90-minute units for evidence from the season being
+    # projected, from a variance-components split of the per-match counts (see
+    # `_within_season_shrink_strength`). Three independent estimators on 2025/26
+    # agree: variance components 3.04/2.37/4.60, odd-vs-even split-half
+    # 3.00/3.04/3.30, random split-half 4.01/2.30/5.37.
+    "shrink_90s": {"2": 3.04, "3": 2.37, "4": 4.60},
+    # Prior strength for evidence from an *earlier* season, from the year-on-year
+    # reliability of a player's own rate (DEF rho=0.77, MID 0.84, FWD 0.71 over
+    # 157 players). Two to three times the within-season figure, because between
+    # seasons a player changes club, manager and role.
+    "cross_season_90s": {"2": 7.6, "3": 4.6, "4": 9.5},
 }
 
 # A season whose component fields are missing contributes its stored count on an
@@ -197,6 +248,8 @@ class DefconFit:
         default_factory=lambda: _int_keyed(FALLBACK["price_log_intercept"]))
     shrink_90s: Dict[int, float] = field(
         default_factory=lambda: _int_keyed(FALLBACK["shrink_90s"]))
+    cross_season_90s: Dict[int, float] = field(
+        default_factory=lambda: _int_keyed(FALLBACK["cross_season_90s"]))
     n_observations: Dict[int, int] = field(default_factory=dict)
     seasons: List[str] = field(default_factory=list)
     source: str = "fallback"
@@ -208,7 +261,7 @@ class DefconFit:
                                "fitted_at": self.fitted_at, "version": self.version}
         for name in ("dispersion", "tilt_beta", "tilt_deviance_drop", "prior_rate90",
                      "price_log_slope", "price_log_intercept", "shrink_90s",
-                     "n_observations"):
+                     "cross_season_90s", "n_observations"):
             out[name] = {str(k): v for k, v in getattr(self, name).items()}
         return out
 
@@ -216,7 +269,8 @@ class DefconFit:
     def from_dict(cls, raw: Dict[str, Any]) -> "DefconFit":
         kwargs: Dict[str, Any] = {}
         for name in ("dispersion", "tilt_beta", "tilt_deviance_drop", "prior_rate90",
-                     "price_log_slope", "price_log_intercept", "shrink_90s"):
+                     "price_log_slope", "price_log_intercept", "shrink_90s",
+                     "cross_season_90s"):
             if name in raw:
                 kwargs[name] = _int_keyed(raw[name])
         if "n_observations" in raw:
@@ -363,9 +417,45 @@ class DefconModel:
             fitted.prior_rate90[pos] = float(
                 90.0 * sub["defensive_contribution"].sum() / sub["minutes"].sum())
 
-            # Shrinkage strength from the rate's year-on-year reliability.
-            fitted.shrink_90s[pos] = self._shrink_strength(state, pos)
+            # Two shrinkage strengths, for two different questions: how much a
+            # rate measured this season tells you about the next match, and how
+            # much a rate measured last season does.
+            fitted.shrink_90s[pos] = self._within_season_shrink_strength(
+                sub, fitted.dispersion[pos], pos)
+            fitted.cross_season_90s[pos] = self._cross_season_shrink_strength(state, pos)
         return fitted
+
+    @staticmethod
+    def _within_season_shrink_strength(
+        sub: pd.DataFrame, dispersion: float, position: int
+    ) -> float:
+        """Prior strength k in 90s from a variance-components split, same season.
+
+        A player's season-to-date rate is a noisy read on his true rate. Removing
+        the part of the cross-player spread that is pure sampling noise leaves the
+        real spread, and k is the ratio of one 90's worth of noise to it — the
+        same construction ``defending._save_share_prior_strength`` uses for the
+        save share, on the negative binomial rather than the binomial.
+
+        This is the number that matters for a projection made mid-season, and it
+        is two to three times smaller than the year-on-year figure, because a
+        player's role is far steadier across a season than across a summer.
+        """
+        agg = sub.groupby("element").agg(
+            actions=("defensive_contribution", "sum"), mins=("minutes", "sum"))
+        agg = agg[agg["mins"] >= 900]
+        if len(agg) < 12:
+            return _int_keyed(FALLBACK["shrink_90s"])[position]
+        n90 = agg["mins"] / 90.0
+        rate = 90.0 * agg["actions"] / agg["mins"]
+        # Variance of a single 90's count under the fitted negative binomial.
+        per90_var = rate + rate ** 2 / max(dispersion, 1e-6)
+        total_var = float(rate.var(ddof=1))
+        sampling_var = float((per90_var / n90).mean())
+        mean_per90_var = float(per90_var.mean())
+        # Floor the true spread so a noisy estimate cannot claim k below ~1.
+        true_var = max(total_var - sampling_var, mean_per90_var / 40.0)
+        return max(1.0, min(40.0, mean_per90_var / true_var))
 
     @staticmethod
     def _pooled_dispersion(
@@ -389,12 +479,13 @@ class DefconModel:
         return max(r, 0.5)
 
     @staticmethod
-    def _shrink_strength(state: "GameState", position: int) -> float:
+    def _cross_season_shrink_strength(state: "GameState", position: int) -> float:
         """Prior strength k in 90s, from the rate's own year-on-year repeatability.
 
         A rate that repeats at correlation rho over n 90s has reliability
         n/(n+k), so k = n(1-rho)/rho. Fitted per position rather than assumed:
-        defenders regress harder than midfielders.
+        defenders regress harder than midfielders. This governs how much an
+        *earlier season's* minutes are worth, not this season's.
         """
         pairs: List[Tuple[float, float, float]] = []
         seasons = [hist.season_slash(hist.prior_season(state.season, back=b)) for b in (2, 1)]
@@ -418,7 +509,7 @@ class DefconModel:
                 continue
             pairs.append((90.0 * ra[0] / ra[1], 90.0 * rb[0] / rb[1], ra[1] / 90.0))
         if len(pairs) < 12:
-            return _int_keyed(FALLBACK["shrink_90s"])[position]
+            return _int_keyed(FALLBACK["cross_season_90s"])[position]
         xs = [p[0] for p in pairs]
         ys = [p[1] for p in pairs]
         mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
@@ -490,12 +581,19 @@ class DefconModel:
                               "goalkeepers cannot score DEFCON")
 
         prior_rate = self.prior_rate(pos, player.price)
-        # (weight, actions, minutes, confirmed, label)
-        sources: List[Tuple[float, float, float, bool, str]] = []
+        # A 90 played in an earlier season carries less information about the
+        # next match than a 90 played this season, in exactly the ratio of the
+        # two fitted prior strengths. Applying it to actions and minutes
+        # together leaves the rate alone and only discounts the sample size.
+        cross = self.fit_params.cross_season_90s.get(pos, 0.0)
+        within = self.fit_params.shrink_90s.get(pos, 6.0)
+        info_older = min(1.0, within / cross) if cross > 0 else 1.0
+        # (decay, info, actions, minutes, confirmed, label)
+        sources: List[Tuple[float, float, float, float, bool, str]] = []
 
         current = frame_defcon_actions(state.history(pid), pos)
         if current is not None:
-            sources.append((1.0, current[0], current[1], current[2], "season-to-date"))
+            sources.append((1.0, 1.0, current[0], current[1], current[2], "season-to-date"))
         for i, season in enumerate(seasons_back):
             row = next((r for r in state.history_past(pid) if r.get("season_name") == season), None)
             if row is None:
@@ -503,29 +601,32 @@ class DefconModel:
             got = season_defcon_actions(row, pos)
             if got is None:
                 continue
-            sources.append((SEASON_DECAY ** i, got[0], got[1], got[2], season))
+            sources.append((SEASON_DECAY ** i, info_older, got[0], got[1], got[2], season))
         if not sources:
             return DefconRate(pid, pos, prior_rate, prior_rate, 0.0, prior_rate, True,
                               "prior",
                               "no DEFCON history; position+price prior %.2f/90" % prior_rate)
 
-        # Renormalise so the best available source always carries full weight:
-        # pre-season the prior season *is* the primary evidence, not a discount.
+        # Renormalise the *recency* decay so the freshest available source always
+        # carries full decay weight: three seasons of nothing should not shrink a
+        # player away merely because newer seasons are missing. The current/older
+        # information ratio is applied after, and is deliberately not renormalised
+        # — how much last season is worth does not depend on what else exists.
         top = max(s[0] for s in sources)
-        actions = sum((s[0] / top) * s[1] * (1.0 if s[3] else UNCONFIRMED_BASIS_WEIGHT)
-                      for s in sources)
-        minutes = sum((s[0] / top) * s[2] * (1.0 if s[3] else UNCONFIRMED_BASIS_WEIGHT)
-                      for s in sources)
+        weights = [(s[0] / top) * s[1] * (1.0 if s[4] else UNCONFIRMED_BASIS_WEIGHT)
+                   for s in sources]
+        actions = sum(w * s[2] for w, s in zip(weights, sources))
+        minutes = sum(w * s[3] for w, s in zip(weights, sources))
         if minutes <= 0:
             return DefconRate(pid, pos, prior_rate, prior_rate, 0.0, prior_rate, True,
                               "prior", "no usable minutes; prior %.2f/90" % prior_rate)
 
         raw = 90.0 * actions / minutes
         n90 = minutes / 90.0
-        shrunk = stats.shrink(raw, n90, prior_rate, self.fit_params.shrink_90s.get(pos, 6.0))
-        confirmed = all(s[3] for s in sources)
-        labels = ", ".join(s[4] for s in sources)
-        reason = "%.2f/90 raw over %.1f 90s (%s) -> %.2f shrunk to prior %.2f%s" % (
+        shrunk = stats.shrink(raw, n90, prior_rate, within)
+        confirmed = all(s[4] for s in sources)
+        labels = ", ".join(s[5] for s in sources)
+        reason = "%.2f/90 raw over %.1f effective 90s (%s) -> %.2f shrunk to prior %.2f%s" % (
             raw, n90, labels, shrunk, prior_rate,
             "" if confirmed else "; position basis unconfirmed for a source")
         return DefconRate(pid, pos, shrunk, raw, n90, prior_rate, confirmed,
@@ -673,13 +774,19 @@ if __name__ == "__main__":
 
     fp = model.fit_params
     print("\n=== fitted parameters ===")
-    print("  %-4s %-10s %-10s %-14s %-10s %-9s %s"
-          % ("pos", "threshold", "prior/90", "dispersion r", "tilt beta", "dev drop", "shrink 90s"))
+    print("  %-4s %-7s %-9s %-9s %-9s %-9s %-10s %s"
+          % ("pos", "thresh", "prior/90", "dispersn", "tilt beta", "dev drop",
+             "shrink 90s", "cross-season 90s"))
     for pos, name in ((scoring.DEF, "DEF"), (scoring.MID, "MID"), (scoring.FWD, "FWD")):
-        print("  %-4s %-10d %-10.2f %-14.2f %-10.4f %-9.1f %.1f"
+        print("  %-4s %-7d %-9.2f %-9.2f %-9.4f %-9.1f %-10.1f %.1f"
               % (name, scoring.DEFCON_THRESHOLD[pos], fp.prior_rate90[pos],
                  fp.dispersion[pos], fp.tilt_beta[pos],
-                 fp.tilt_deviance_drop.get(pos, float("nan")), fp.shrink_90s[pos]))
+                 fp.tilt_deviance_drop.get(pos, float("nan")),
+                 fp.shrink_90s[pos], fp.cross_season_90s[pos]))
+    print("  the two prior strengths answer different questions: shrink90s is how much a")
+    print("  rate measured THIS season is worth, cross-season 90s how much last season's is.")
+    print("  A 90 played earlier enters as %.2f (DEF) of a 90 played now."
+          % (fp.shrink_90s[scoring.DEF] / max(fp.cross_season_90s[scoring.DEF], 1e-9)))
     print("  dispersion in words: at a mean of 8 actions a DEF's per-match variance is")
     print("    %.2f, against %.2f under a Poisson - real overdispersion, so a Poisson"
           % (8 + 64.0 / fp.dispersion[scoring.DEF], 8.0))

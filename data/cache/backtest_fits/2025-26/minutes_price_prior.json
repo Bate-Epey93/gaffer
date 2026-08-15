@@ -1,6 +1,7 @@
 {
   "fitted_from_season": "2024-25",
-  "fitted_at": "2026-08-14T23:05:08.394528+00:00",
+  "fitted_at": "2026-08-15T03:55:31.573959+00:00",
+  "fit_version": 2,
   "n_players": 784,
   "n_player_matches": 27283,
   "shrinkage_strength": 4.0,
@@ -503,9 +504,27 @@
   "prior_season_reliability": 0.6250000000000002,
   "new_club_reliability": 0.20000000000000007,
   "within_season_reliability": 0.7935737879707639,
-  "recency_half_life_gws": 8.0,
-  "prior_decay_matches": 1.0,
-  "recency_fit_logloss": 0.35305785876003787,
+  "recency_half_life_gws": 12.0,
+  "prior_decay_matches": 6.0,
+  "recency_fit_logloss": 0.28968863653127874,
+  "recent_state_terms": {
+    "const": -1.574311866422566,
+    "logit_p": 0.7414742295702743,
+    "start_1": 2.4877902863189405,
+    "sub_1": 1.62562890293275,
+    "seen_2": -0.424972644241033,
+    "start_2": 0.6919193964773853,
+    "sub_2": 0.26104212261997223
+  },
+  "recent_state_horizon_gamma": [
+    1.0,
+    0.9,
+    0.8500000000000001,
+    0.8,
+    0.75,
+    0.75
+  ],
+  "recency_fit_logloss_no_state": 0.35529274461452354,
   "cohort_baseline_start_rate": 0.7476023391812866,
   "absence_recovery": [
     0.22429427790836107,
@@ -860,5 +879,56 @@
       ]
     }
   },
-  "_grid_note": "position -> price -> [P(start) at club-position price rank 0..7]"
+  "_grid_note": "position -> price -> [P(start) at club-position price rank 0..7]",
+  "_recent_state_grid": {
+    "0.10": {
+      "started both": 0.3897,
+      "started last only": 0.2422,
+      "sub last": 0.2123,
+      "absent last": 0.0504,
+      "absent both": 0.0259,
+      "one match played": 0.3283
+    },
+    "0.30": {
+      "started both": 0.6346,
+      "started last only": 0.4651,
+      "sub last": 0.4231,
+      "absent last": 0.1261,
+      "absent both": 0.0674,
+      "one match played": 0.5708
+    },
+    "0.50": {
+      "started both": 0.765,
+      "started last only": 0.6198,
+      "sub last": 0.5789,
+      "absent last": 0.2129,
+      "absent both": 0.1193,
+      "one match played": 0.7137
+    },
+    "0.70": {
+      "started both": 0.8592,
+      "started last only": 0.7534,
+      "sub last": 0.7204,
+      "absent last": 0.3365,
+      "absent both": 0.2025,
+      "one match played": 0.8237
+    },
+    "0.85": {
+      "started both": 0.9218,
+      "started last only": 0.855,
+      "sub last": 0.8326,
+      "absent last": 0.4947,
+      "absent both": 0.3289,
+      "one match played": 0.9002
+    },
+    "0.95": {
+      "started both": 0.9665,
+      "started last only": 0.9353,
+      "sub last": 0.9242,
+      "absent last": 0.706,
+      "absent both": 0.5459,
+      "one match played": 0.9568
+    }
+  },
+  "_recent_state_note": "pooled long-run P(start) -> corrected P(start) given the previous two matches"
 }

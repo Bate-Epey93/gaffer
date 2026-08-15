@@ -420,6 +420,11 @@ class _Working:
     mins_sub: float = 0.0
     mins_scale: float = 1.0
     p_cs_match: float = 0.0
+    # E[minutes | reached 60] / 90, from defending.on_pitch_fraction. Clean
+    # sheets and conceded goals are settled over the minutes the player was on
+    # the pitch, so the simulator must scale by the same figure the analytic
+    # terms use or the two stop agreeing.
+    on_pitch_fraction: float = 1.0
     p_defcon_start: float = 0.0
     p_defcon_sub: float = 0.0
     p_yellow: float = 0.0
@@ -687,6 +692,7 @@ class XPEngine:
         proj.xp_goals_conceded = d["xp_goals_conceded"]
         proj.xp_saves = d["xp_saves"]
         work.p_cs_match = _clip01(d["p_clean_sheet_match"])
+        work.on_pitch_fraction = float(d.get("on_pitch_fraction", 1.0))
         work.variance["clean_sheet"] = d["var_clean_sheet"]
         work.variance["saves"] = d["var_saves"]
         if on_pitch90 > 1e-9:
@@ -699,7 +705,8 @@ class XPEngine:
         # zero) and dropping the covariance understates a defender's spread.
         per = float(scoring.GOALS_CONCEDED_POINTS[pos])
         if per != 0.0:
-            e1, e2 = _conceded_moments(proj.lambda_conceded)
+            e1, e2 = _conceded_moments(
+                proj.lambda_conceded * work.on_pitch_fraction)
             mean_c = per * p_60 * e1
             var_c = (per ** 2) * (p_60 * e2) - mean_c ** 2
             work.variance["goals_conceded"] = max(var_c, 0.0)
@@ -848,35 +855,47 @@ class XPEngine:
         sds: Dict[int, float],
         expected_bonus: Dict[int, float],
     ) -> Dict[int, Tuple[float, float, float]]:
-        """P(1st)/P(2nd)/P(3rd) in BPS for every candidate in this fixture.
+        """P(3 bonus)/P(2 bonus)/P(1 bonus) for every candidate in this fixture.
 
         ``bonus.project_bonus`` returns only the expectation, but the second
-        moment and the simulated bonus tier both need the full rank vector, so
-        the same shared ranker is run here with the same inputs and the same
-        per-fixture seed. The reconstructed expectation is checked against the
-        bonus model's own on every fixture — a divergence would mean the two
-        have drifted apart, and is logged rather than absorbed.
+        moment and the simulated bonus tier both need the full tier vector.
+        The bonus model's ranker is a fixture-level event simulation — one
+        clean-sheet draw per team, Poisson goals, a two-stage appearance, and
+        FPL's tie rules on integer BPS — and so cannot be reproduced by
+        re-running a sampler on the means and standard deviations alone; the
+        vector is read back from the run that produced the expectation. The
+        reconstruction is still checked against that expectation on every
+        fixture: a divergence would mean the two have drifted apart, and is
+        logged rather than absorbed.
+
+        These are bonus *tiers*, not BPS ranks: under a tie two players can both
+        be awarded 3. ``9*p3 + 4*p2 + p1 - E[bonus]^2`` is therefore still the
+        exact variance, which is what the caller uses it for.
         """
         if not bps:
             return {}
-        # The ranker walks ``scores.keys()`` in insertion order and assigns each
-        # candidate a column of the draw matrix from it, so the dict must be
-        # built in the same order ``BonusModel.project_bonus`` builds it —
-        # sorted by id — or the two runs sample different noise for the same
-        # player and the reconstructed bonus drifts by a few hundredths.
-        ids = sorted(bps.keys())
-        scores = {pid: float(bps[pid]) for pid in ids}
-        sigma: Dict[int, float] = {}
-        for pid in ids:
-            value = sds.get(pid) if sds is not None else None
-            if value is None:
-                value = self.bonus.bps_sd(pid)
-            sigma[pid] = max(float(value), 0.5)
-        raw = stats.top_k_probabilities(
-            scores, sigma, k=3,
-            iterations=int(self.config.model.bps_sim_iterations),
-            seed=7 + int(fixture.id),
-        )
+        cached = self.bonus.rank_probabilities(int(fixture.id))
+        if cached is not None:
+            raw = {pid: list(value) for pid, value in cached.items()}
+        else:
+            # The ranker walks ``scores.keys()`` in insertion order and assigns
+            # each candidate a column of the draw matrix from it, so the dict
+            # must be built in the same order ``BonusModel.project_bonus``
+            # builds it — sorted by id — or the two runs sample different noise
+            # for the same player and the reconstructed bonus drifts.
+            ids = sorted(bps.keys())
+            scores = {pid: float(bps[pid]) for pid in ids}
+            sigma: Dict[int, float] = {}
+            for pid in ids:
+                value = sds.get(pid) if sds is not None else None
+                if value is None:
+                    value = self.bonus.bps_sd(pid)
+                sigma[pid] = max(float(value), 0.5)
+            raw = stats.top_k_probabilities(
+                scores, sigma, k=3,
+                iterations=int(self.config.model.bps_sim_iterations),
+                seed=7 + int(fixture.id),
+            )
         out: Dict[int, Tuple[float, float, float]] = {}
         worst = 0.0
         for pid, probs in raw.items():
@@ -948,8 +967,12 @@ class XPEngine:
             np.maximum(work.rate90_pen_attempts * work.penalty_miss_rate * frac, 0.0))
 
         # --- goals conceded and clean sheet ---------------------------------
-        lam_c = max(proj.lambda_conceded, 1e-6)
-        cs_draw = rng.random(n) < work.p_cs_match
+        # Both settle over the minutes the player was on the pitch, exactly as
+        # the analytic terms in `_project_one` do; drawing them over the whole
+        # match instead is what makes the simulated mean drift below the
+        # analytic total for anyone who is regularly withdrawn.
+        lam_c = max(proj.lambda_conceded * work.on_pitch_fraction, 1e-6)
+        cs_draw = rng.random(n) < work.p_cs_match ** work.on_pitch_fraction
         cdf = _conditional_conceded_cdf(lam_c)
         conceded = 1 + np.searchsorted(cdf, rng.random(n))
         conceded = np.where(cs_draw, 0, np.minimum(conceded, MAX_CONCEDED))

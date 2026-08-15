@@ -54,7 +54,6 @@
   var el = U.el, qs = U.qs, isNum = U.isNum;
 
   var API = '/api';
-  var REQUEST_TIMEOUT_MS = 20000;
 
   // The first set of chips dies at the GW19 deadline: 2027-01-02 (SPEC 1).
   // Only the date is documented, so the time is an estimate until the backend
@@ -88,10 +87,37 @@
 
   function apiUrl(path) { return API + path; }
 
+  /* How long to wait, by endpoint. One flat 20s budget used to abort the two
+     endpoints that solve a MILP: /chips is measurably ~20.5s against a freshly
+     built snapshot (Free Hit and Wildcard each solve their own problem on top
+     of the recommended-fifteen solve), so the first call on every page load
+     was cancelled and the header fell back to a *guessed* chip deadline.
+     /state is the other one: on a cold backend it blocks on the first fit
+     (~16s here with an empty cache) and aborting it drops the whole dashboard
+     into SAMPLE mode while the backend is in fact healthy. These are waits,
+     not faults, so they get room; everything else keeps the short leash. */
+  var TIMEOUT_DEFAULT_MS = 20000;
+  var TIMEOUT_MS = [
+    [/^\/chips/, 120000],
+    [/^\/optimize/, 120000],
+    [/^\/refresh/, 300000],
+    [/^\/state/, 90000],
+    [/^\/players/, 90000],
+    [/^\/projections/, 90000]
+  ];
+
+  function timeoutFor(path) {
+    for (var i = 0; i < TIMEOUT_MS.length; i++) {
+      if (TIMEOUT_MS[i][0].test(path)) return TIMEOUT_MS[i][1];
+    }
+    return TIMEOUT_DEFAULT_MS;
+  }
+
   function request(path, opts) {
     opts = opts || {};
+    var budget = opts.timeout || timeoutFor(path);
     var ctrl = ('AbortController' in window) ? new AbortController() : null;
-    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, REQUEST_TIMEOUT_MS) : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, budget) : null;
     var init = {
       method: opts.method || 'GET',
       headers: { 'Accept': 'application/json' },
@@ -133,7 +159,7 @@
       if (timer) clearTimeout(timer);
       var e = new Error(
         netErr && netErr.name === 'AbortError'
-          ? 'no response within ' + (REQUEST_TIMEOUT_MS / 1000) + 's'
+          ? 'no response within ' + Math.round(budget / 1000) + 's'
           : (netErr && netErr.message) || 'network error'
       );
       e.network = true;

@@ -8,7 +8,20 @@ start is worth 0. The model answers four questions per player per gameweek:
     p_60      P(minutes >= 60)   -- conditioned on starting, see below
     xmins     E[minutes]
 
-Three ideas do the work.
+Four ideas do the work.
+
+**0. A role is not a state.** "How often does this player start?" and "is he in
+the team right now?" are different questions, and a single decayed rate cannot
+answer both — any decay short enough to react to a benching is too short to hold
+a season-long role. So the pooled rate below answers the first, and a fitted
+log-odds correction read off the previous two matches answers the second. The
+correction is large and it is not a metric artefact: in each of 2023/24, 2024/25
+and 2025/26, a player whose long-run start rate is above 85% starts the next
+match 94% of the time having started the last two, 70% having come off the
+bench, 61% having been absent once, and 25-36% having been absent twice. A
+decayed rate moves by about a tenth in that situation; the truth moves by two
+thirds. Fitting it cut the start log-loss on the fitting season from 0.336 to
+0.264 and, out of sample on the following season, from 0.332 to 0.264.
 
 **1. Evidence hierarchy with beta-binomial shrinkage.** Start opportunities are
 Bernoulli trials. Current-season starts (exponentially decayed towards the most
@@ -73,6 +86,21 @@ DOUBTFUL_STATUS = "d"
 # position group the pecking order stops carrying information (every club has a
 # long tail of £4.0m youth-team names).
 RANK_CAP = 9
+
+# Version of the fitted-parameter schema; see MinutesFit.fit_version.
+FIT_VERSION = 2
+
+# The recent-state design matrix. `const` and `logit_p` recalibrate the pooled
+# long-run rate; the rest are dummies for the previous two matches, with
+# "registered but did not play" as the reference level of each. `seen_2` marks
+# that a second previous match exists at all, so a player one match into a
+# season is not scored as though he had been dropped for the one before it.
+RECENT_STATE_COLUMNS: Tuple[str, ...] = (
+    "const", "logit_p", "start_1", "sub_1", "seen_2", "start_2", "sub_2",
+)
+# Feature columns only (everything after the two recalibration terms).
+RECENT_STATE_FEATURES: Tuple[str, ...] = RECENT_STATE_COLUMNS[2:]
+RECENT_STATE_HORIZON = 6
 
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -205,6 +233,10 @@ class MinutesFit:
 
     fitted_from_season: str = ""
     fitted_at: str = ""
+    # Bumped whenever the fit gains a field the forecast depends on, so a
+    # report written by an older build is refitted instead of silently used
+    # with the new field left at its empty default.
+    fit_version: int = FIT_VERSION
     n_players: int = 0
     n_player_matches: int = 0
     # config.model.shrinkage_90s_minutes at fit time. Several fitted quantities
@@ -255,6 +287,23 @@ class MinutesFit:
     prior_decay_matches: float = 8.0
     recency_fit_logloss: float = 0.0
 
+    # Recent-state correction. An exponentially decayed start rate is a *rate*:
+    # one benching moves it by 1/(effective trials), roughly a tenth. The data
+    # say the last match is worth far more than that -- a 90% starter who was
+    # absent last week starts the next one 61% of the time, and 25-36% if he was
+    # absent the last two. These coefficients are the log-odds correction for
+    # what happened in the previous two matches, fitted jointly with the
+    # half-life and the prior-season decay so the three cannot double-count.
+    # Keys: RECENT_STATE_COLUMNS.
+    recent_state_terms: Dict[str, float] = field(default_factory=dict)
+    # How much of that correction survives h matches ahead (h = 1..6). Recent
+    # state goes stale: by six gameweeks out we no longer know whether the
+    # player has been playing in between.
+    recent_state_horizon_gamma: List[float] = field(default_factory=list)
+    # Log-loss at the chosen hyperparameters with the correction switched off,
+    # for the report; `recency_fit_logloss` is the value with it on.
+    recency_fit_logloss_no_state: float = 0.0
+
     # Availability dynamics, all measured on regular starters (>=50% start rate).
     cohort_baseline_start_rate: float = 0.0
     # P(start h matches later | absent the last two), h = 1..6, as a fraction of
@@ -276,6 +325,9 @@ class MinutesFit:
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "MinutesFit":
         fit = cls()
+        # A report written before versioning carries no marker, and its missing
+        # fields would otherwise sit at the current schema's empty defaults.
+        fit.fit_version = int(raw.get("fit_version", 0))
         for key, value in raw.items():
             if hasattr(fit, key):
                 setattr(fit, key, value)
@@ -391,6 +443,60 @@ def _weighted_logloss(p: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
     return float(-np.sum(w * (y * np.log(p) + (1.0 - y) * np.log(1.0 - p))) / np.sum(w))
 
 
+def _mean_logloss(p: np.ndarray, y: np.ndarray) -> float:
+    p = np.clip(p, 1e-6, 1.0 - 1e-6)
+    return float(-np.mean(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
+
+
+def _logit_vec(p: np.ndarray) -> np.ndarray:
+    p = np.clip(np.asarray(p, dtype=float), 1e-6, 1.0 - 1e-6)
+    return np.log(p / (1.0 - p))
+
+
+def _recent_state_panel(
+    starts: np.ndarray, appeared: np.ndarray, mask: np.ndarray
+) -> np.ndarray:
+    """(players, matches, 5) recent-state dummies, aligned to RECENT_STATE_FEATURES.
+
+    Row ``t`` describes what happened in matches ``t-1`` and ``t-2``, so it can
+    be used to predict match ``t`` without touching it. Player sequences are
+    packed from column 0, so ``mask[i, t]`` implies ``mask[i, t-1]``.
+    """
+    n, horizon = starts.shape
+    panel = np.zeros((n, horizon, len(RECENT_STATE_FEATURES)))
+    played = (appeared > 0) & (starts == 0) & mask
+    for t in range(1, horizon):
+        panel[:, t, 0] = starts[:, t - 1] * mask[:, t - 1]
+        panel[:, t, 1] = played[:, t - 1].astype(float)
+        if t >= 2:
+            panel[:, t, 2] = mask[:, t - 2].astype(float)
+            panel[:, t, 3] = starts[:, t - 2] * mask[:, t - 2]
+            panel[:, t, 4] = played[:, t - 2].astype(float)
+    return panel
+
+
+def recent_state_features(
+    starts: Sequence[float], appeared: Sequence[float]
+) -> Optional[List[float]]:
+    """The recent-state vector for the *next* match, from a player's history tail.
+
+    `starts[-1]` and `appeared[-1]` are the most recent match. Returns None when
+    there is no current-season match to read, in which case no correction
+    applies and the pooled long-run rate stands on its own.
+    """
+    n = len(starts)
+    if n < 1:
+        return None
+    out = [0.0] * len(RECENT_STATE_FEATURES)
+    out[0] = 1.0 if starts[-1] >= 1 else 0.0
+    out[1] = 1.0 if (starts[-1] < 1 and appeared[-1] > 0) else 0.0
+    if n >= 2:
+        out[2] = 1.0
+        out[3] = 1.0 if starts[-2] >= 1 else 0.0
+        out[4] = 1.0 if (starts[-2] < 1 and appeared[-2] > 0) else 0.0
+    return out
+
+
 def club_position_price_ranks(
     prices: Sequence[float], team_ids: Sequence[int], positions: Sequence[int]
 ) -> List[float]:
@@ -433,6 +539,17 @@ class _Role:
     price_prior: float = 0.0
     rank: float = 0.0
     source: str = "prior"
+    # The pooled long-run start rate, before the recent-state correction. The
+    # substitute curves are functions of a *season* start rate, so they are read
+    # off this rather than off the corrected value.
+    long_run_p_start: float = 0.0
+    # Recent-state correction, split so a horizon can scale the evidence part
+    # without disturbing the recalibration. None when it does not apply (no
+    # current-season match to read, or no fitted terms).
+    state_base_logodds: Optional[float] = None
+    state_shift: float = 0.0
+    # Multiplier from config.model.rotation_risk_penalty, applied after both.
+    rotation_factor: float = 1.0
 
 
 class MinutesModel:
@@ -505,6 +622,10 @@ class MinutesModel:
         fit_params = MinutesFit.from_dict(raw)
         if not fit_params.price_prior:
             return None
+        if int(fit_params.fit_version) != FIT_VERSION:
+            log.info("cached minutes fit is version %s, this build writes %d; refitting",
+                     fit_params.fit_version, FIT_VERSION)
+            return None
         if expect_season is not None:
             if hist.season_dash(fit_params.fitted_from_season or "1900-01") != hist.season_dash(expect_season):
                 return None
@@ -528,6 +649,33 @@ class MinutesModel:
             for pos in ("GKP", "DEF", "MID", "FWD")
         }
         payload["_grid_note"] = "position -> price -> [P(start) at club-position price rank 0..7]"
+        terms = fit_params.recent_state_terms
+        if terms:
+            payload["_recent_state_grid"] = {
+                "%.2f" % long_run: {
+                    label: round(
+                        _expit(
+                            terms.get("const", 0.0)
+                            + terms.get("logit_p", 1.0) * _logit(long_run)
+                            + sum(terms.get(k, 0.0) * v
+                                  for k, v in zip(RECENT_STATE_FEATURES, vector))
+                        ),
+                        4,
+                    )
+                    for label, vector in (
+                        ("started both", [1, 0, 1, 1, 0]),
+                        ("started last only", [1, 0, 1, 0, 0]),
+                        ("sub last", [0, 1, 1, 1, 0]),
+                        ("absent last", [0, 0, 1, 1, 0]),
+                        ("absent both", [0, 0, 1, 0, 0]),
+                        ("one match played", [1, 0, 0, 0, 0]),
+                    )
+                }
+                for long_run in (0.10, 0.30, 0.50, 0.70, 0.85, 0.95)
+            }
+            payload["_recent_state_note"] = (
+                "pooled long-run P(start) -> corrected P(start) given the previous two matches"
+            )
         with open(PRIOR_REPORT_PATH, "w") as fh:
             json.dump(payload, fh, indent=2, sort_keys=False)
         log.info("wrote %s", PRIOR_REPORT_PATH)
@@ -835,14 +983,16 @@ class MinutesModel:
         per_player: pd.DataFrame,
         prev: Optional[pd.DataFrame],
     ) -> None:
-        """Fit the in-season half-life and the prior-season decay together.
+        """Fit the half-life, the prior-season decay and the recent-state terms.
 
         Each match of last season is predicted from exactly the posterior the
         model computes — decayed current-season starts, the season-before rate
-        at its fitted reliability, and the price prior — and the pair
-        (half_life, prior_decay) minimising log-loss wins. Fitting them jointly
-        matters: they trade off directly, and separately-tuned values leave a
-        player who has started the last six ranked below a benched premium.
+        at its fitted reliability, and the price prior — corrected by what
+        happened in the previous two matches, and the combination minimising
+        log-loss wins. All three are fitted in one objective because they trade
+        off directly: an exponential decay short enough to react to a benching
+        is too short to hold a season-long role, and separately-tuned values
+        either over-smooth the recent evidence or throw the long-run rate away.
         """
         K = max(float(self.config.model.shrinkage_90s_minutes), 0.25)
         elements = [int(e) for e in per_player.index]
@@ -867,29 +1017,45 @@ class MinutesModel:
                 prev_rate[i] = hit[0]
                 prev_trials_full[i] = K * rel / (1.0 - rel)
 
-        by_element = {int(el): grp["starts"].values.astype(float)
+        by_starts = {int(el): grp["starts"].values.astype(float)
+                     for el, grp in ordered.groupby("element")}
+        by_minutes = {int(el): grp["minutes"].values.astype(float)
                       for el, grp in ordered.groupby("element")}
-        lengths = [len(by_element.get(el, [])) for el in elements]
+        lengths = [len(by_starts.get(el, [])) for el in elements]
         max_len = max(lengths) if lengths else 0
         if max_len < 8:
             return
         starts = np.zeros((len(elements), max_len))
+        appeared = np.zeros((len(elements), max_len))
         mask = np.zeros((len(elements), max_len), dtype=bool)
         for i, el in enumerate(elements):
-            arr = by_element.get(el)
+            arr = by_starts.get(el)
             if arr is None:
                 continue
             starts[i, : len(arr)] = arr
+            mins = by_minutes.get(el)
+            if mins is not None:
+                appeared[i, : len(mins)] = (mins > 0).astype(float)
             mask[i, : len(arr)] = True
+        panel = _recent_state_panel(starts, appeared, mask)
 
         # Predict from the second match onwards: the early-season regime, where
         # the prior season is doing most of the work, has to be part of the
         # objective or the decay is fitted only on the data that ignores it.
+        # It is also the first match at which a previous one exists to read.
         warmup = 1
         have_prev = bool(prev_trials_full.any())
         decay_grid = (1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 10.0, 16.0, 30.0, 1e6) if have_prev else (1e6,)
         steps = np.arange(max_len, dtype=float)
-        best = (fit_params.recency_half_life_gws, fit_params.prior_decay_matches, float("inf"))
+        use = mask & (steps[None, :] >= warmup)
+        if not use.any():
+            return
+        y = starts[use]
+        features = panel[use]
+        ones = np.ones(len(y))
+        best_ll = float("inf")
+        best: Tuple[float, float, Optional[np.ndarray], float] = (
+            fit_params.recency_half_life_gws, fit_params.prior_decay_matches, None, float("inf"))
         for half_life in (2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0, 1e6):
             decay = 0.5 ** (1.0 / half_life)
             ssum = np.zeros((len(elements), max_len))
@@ -906,19 +1072,27 @@ class MinutesModel:
                 pt = prev_trials_full[:, None] * shrinkfac[None, :]
                 num = ssum + pt * prev_rate[:, None] + K * prior_p[:, None]
                 den = wsum + pt + K
-                p = np.clip(num / den, 1e-4, 1 - 1e-4)
-                use = mask & (steps[None, :] >= warmup)
-                if not use.any():
-                    continue
-                y = starts[use]
-                q = p[use]
-                ll = float(-np.mean(y * np.log(q) + (1 - y) * np.log(1 - q)))
-                if ll < best[2]:
-                    best = (half_life, prior_decay, ll)
+                q = np.clip(num / den, 1e-4, 1 - 1e-4)[use]
+                design = np.column_stack([ones, _logit_vec(q), features])
+                beta = _frac_logit(design, y, ones, iters=60, ridge=1e-2)
+                adjusted = 1.0 / (1.0 + np.exp(-np.clip(design @ beta, -30.0, 30.0)))
+                ll = _mean_logloss(adjusted, y)
+                if ll < best_ll:
+                    best_ll = ll
+                    best = (half_life, prior_decay, beta, _mean_logloss(q, y))
         fit_params.recency_half_life_gws = float(best[0])
         if have_prev:
             fit_params.prior_decay_matches = float(best[1])
-        fit_params.recency_fit_logloss = float(best[2])
+        fit_params.recency_fit_logloss = float(best_ll)
+        fit_params.recency_fit_logloss_no_state = float(best[3])
+        if best[2] is not None:
+            fit_params.recent_state_terms = {
+                name: float(value) for name, value in zip(RECENT_STATE_COLUMNS, best[2])
+            }
+            fit_params.recent_state_horizon_gamma = self._fit_state_horizon_decay(
+                fit_params, best[2], starts, mask, panel, prior_p, prev_rate,
+                prev_trials_full, K, warmup,
+            )
 
         # Half-season split: how much a 19-match sample tells you about the next
         # 19. Reported so the shrinkage strength can be sanity-checked.
@@ -932,6 +1106,77 @@ class MinutesModel:
             r2 = (both["sum_2"] / both["size_2"]).values
             slope = float(np.polyfit(r1, r2, 1)[0])
             fit_params.within_season_reliability = max(0.05, min(0.98, slope))
+
+    @staticmethod
+    def _fit_state_horizon_decay(
+        fit_params: MinutesFit,
+        beta: np.ndarray,
+        starts: np.ndarray,
+        mask: np.ndarray,
+        panel: np.ndarray,
+        prior_p: np.ndarray,
+        prev_rate: np.ndarray,
+        prev_trials_full: np.ndarray,
+        K: float,
+        warmup: int,
+    ) -> List[float]:
+        """How much of the recent-state correction still holds h matches out.
+
+        A projection for gameweek G+3 is made at the G deadline, so it reads the
+        same two matches as the projection for G — by then two more will have
+        been played that the model cannot see. The correction is therefore
+        scaled by a factor fitted per horizon, holding the recalibration terms
+        fixed so only the freshness of the evidence is being estimated.
+        """
+        n, max_len = starts.shape
+        decay = 0.5 ** (1.0 / max(fit_params.recency_half_life_gws, 0.5))
+        ssum = np.zeros((n, max_len))
+        wsum = np.zeros((n, max_len))
+        s = np.zeros(n)
+        w = np.zeros(n)
+        for t in range(max_len):
+            ssum[:, t] = s
+            wsum[:, t] = w
+            s = s * decay + starts[:, t] * mask[:, t]
+            w = w * decay + mask[:, t].astype(float)
+        steps = np.arange(max_len, dtype=float)
+        shrinkfac = 0.5 ** (steps / max(fit_params.prior_decay_matches, 0.5))
+        pt = prev_trials_full[:, None] * shrinkfac[None, :]
+        p = np.clip(
+            (ssum + pt * prev_rate[:, None] + K * prior_p[:, None]) / (wsum + pt + K),
+            1e-4, 1 - 1e-4,
+        )
+
+        gammas: List[float] = []
+        for h in range(1, RECENT_STATE_HORIZON + 1):
+            lag = h - 1
+            target = np.zeros_like(starts)
+            target_ok = np.zeros_like(mask)
+            if lag:
+                target[:, :max_len - lag] = starts[:, lag:]
+                target_ok[:, :max_len - lag] = mask[:, lag:]
+            else:
+                target = starts
+                target_ok = mask
+            use = mask & target_ok & (steps[None, :] >= warmup)
+            if use.sum() < 500:
+                gammas.append(gammas[-1] if gammas else 1.0)
+                continue
+            base = beta[0] + beta[1] * _logit_vec(p[use])
+            shift = panel[use] @ beta[2:]
+            y = target[use]
+            best = (1.0, float("inf"))
+            for gamma in np.arange(0.0, 1.51, 0.05):
+                q = 1.0 / (1.0 + np.exp(-np.clip(base + gamma * shift, -30.0, 30.0)))
+                ll = _mean_logloss(q, y)
+                if ll < best[1]:
+                    best = (float(gamma), ll)
+            gammas.append(best[0])
+        # Freshness cannot increase with distance; enforce monotonicity so a
+        # noisy bucket cannot make gameweek G+4 react harder than G+1.
+        for i in range(1, len(gammas)):
+            gammas[i] = min(gammas[i], gammas[i - 1])
+        return gammas
 
     # -- availability dynamics ---------------------------------------------
 
@@ -1235,6 +1480,7 @@ class MinutesModel:
         cur_starts = cur_60 = cur_mins_started = 0.0
         cur_non_starts = cur_subs = cur_sub_mins = 0.0
         n_gws_seen = 0
+        recent_state: Optional[List[float]] = None
         history = state.history(player.id)
         if history is not None and len(history) and "starts" in history.columns:
             frame = history.sort_values("round" if "round" in history.columns else "gw")
@@ -1254,6 +1500,7 @@ class MinutesModel:
             cur_non_starts = float((~started_mask).sum())
             cur_subs = float(((minutes > 0) & (~started_mask)).sum())
             cur_sub_mins = float(minutes[(minutes > 0) & (~started_mask)].sum())
+            recent_state = recent_state_features(starts, minutes)
 
         # --- prior season ---
         moved = self._joined_recently(player)
@@ -1307,7 +1554,8 @@ class MinutesModel:
 
         succ = cur_succ + prior_succ
         trials = cur_trials + prior_trials
-        role.p_start = float(stats.beta_binomial_rate(succ, trials, p_prior, K))
+        role.long_run_p_start = float(stats.beta_binomial_rate(succ, trials, p_prior, K))
+        role.p_start = role.long_run_p_start
         role.n_trials = trials
 
         # --- P(60 | start) ---
@@ -1322,13 +1570,15 @@ class MinutesModel:
         )
 
         # --- substitute behaviour ---
-        curve_sub = _interp(fit_params.sub_appear_curve, role.p_start)
+        # Keyed off the long-run rate: both curves were fitted against a
+        # player's *season* start rate, which is what that quantity is.
+        curve_sub = _interp(fit_params.sub_appear_curve, role.long_run_p_start)
         sub_succ = cur_subs + prior_subs * reliability
         sub_trials = cur_non_starts + prior_non_starts * reliability
         role.p_sub_given_no_start = float(
             stats.beta_binomial_rate(sub_succ, sub_trials, curve_sub, K)
         )
-        curve_mins = _interp(fit_params.sub_minutes_curve, role.p_start)
+        curve_mins = _interp(fit_params.sub_minutes_curve, role.long_run_p_start)
         observed_sub_mins = (cur_sub_mins + prior_sub_mins * reliability)
         observed_sub_apps = (cur_subs + prior_subs * reliability)
         role.mins_per_sub = float(
@@ -1340,10 +1590,37 @@ class MinutesModel:
             )
         )
 
+        # --- recent state ---
+        # A decayed rate answers "how often does this player start?"; the last
+        # two matches answer "is he starting *now*?", and the second question is
+        # worth far more than one match out of ten effective trials. Skipped
+        # with no current-season match to read, since the dummies would then be
+        # read as "did not play", which is not what an empty history means.
+        terms = fit_params.recent_state_terms
+        if terms and recent_state is not None:
+            shift = sum(
+                float(terms.get(name, 0.0)) * value
+                for name, value in zip(RECENT_STATE_FEATURES, recent_state)
+            )
+            # For a player the API has already flagged out, `_availability`
+            # prices the absence from the news and the fitted return ramp. The
+            # same absence is visible in his minutes, so letting it push the
+            # role down as well would count it twice; here the recent state may
+            # only raise him.
+            if (player.status or "a") in HARD_OUT_STATUSES:
+                shift = max(shift, 0.0)
+            role.state_base_logodds = (
+                float(terms.get("const", 0.0))
+                + float(terms.get("logit_p", 1.0)) * _logit(role.long_run_p_start)
+            )
+            role.state_shift = float(shift)
+            role.p_start = _expit(role.state_base_logodds + shift)
+
         # --- rotation risk (only when the user asks for it) ---
         penalty = float(self.config.model.rotation_risk_penalty)
         if penalty > 0 and player.team_id in self._europe_team_ids:
-            role.p_start *= max(0.0, 1.0 - penalty)
+            role.rotation_factor = max(0.0, 1.0 - penalty)
+            role.p_start *= role.rotation_factor
 
         # --- provenance ---
         if n_gws_seen > 0:
@@ -1528,6 +1805,25 @@ class MinutesModel:
                 hi = mid
         return math.sqrt(lo * hi)
 
+    def role_p_start(self, player_id: int, gw: int) -> float:
+        """The player's start probability for `gw`, before availability.
+
+        Identical to ``role.p_start`` for the imminent gameweek. Further out the
+        recent-state correction is scaled by its fitted horizon factor, because
+        the matches it reads are that many gameweeks staler by then.
+        """
+        role = self._roles[player_id]
+        if role.state_base_logodds is None:
+            return _clamp01(role.p_start)
+        gammas = (self.fit_params.recent_state_horizon_gamma
+                  if self.fit_params is not None else None)
+        horizon = max(1, int(gw) - self._state_current_gw + 1)
+        gamma = 1.0
+        if gammas:
+            gamma = float(gammas[min(horizon, len(gammas)) - 1])
+        value = _expit(role.state_base_logodds + gamma * role.state_shift)
+        return _clamp01(value * role.rotation_factor)
+
     def _team_adjustment(self, state: Any, team_id: int, gw: int) -> Tuple[float, float, float]:
         """(GK odds multiplier, outfield odds multiplier, substitute multiplier).
 
@@ -1549,7 +1845,7 @@ class MinutesModel:
         keepers, outfield = [], []
         for pid in members:
             avail, _ = self._availability(state.players[pid], gw)
-            p = _clamp01(self._roles[pid].p_start * avail)
+            p = _clamp01(self.role_p_start(pid, gw) * avail)
             (keepers if state.players[pid].position == scoring.GKP else outfield).append(p)
         lam_gk = self._odds_scale(keepers, 1.0)
         lam_out = self._odds_scale(outfield, float(scoring.SQUAD_PLAY - 1))
@@ -1559,7 +1855,7 @@ class MinutesModel:
             if avail <= 0.0:
                 continue  # an unavailable player cannot be one of the four subs
             lam = lam_gk if state.players[pid].position == scoring.GKP else lam_out
-            p = _start_after(_clamp01(self._roles[pid].p_start * avail), lam)
+            p = _start_after(_clamp01(self.role_p_start(pid, gw) * avail), lam)
             raw_sub += (1.0 - p) * self._roles[pid].p_sub_given_no_start
         target_sub = max(fit_params.subs_per_team_match, 0.0)
         sub_scale = 1.0
@@ -1582,7 +1878,7 @@ class MinutesModel:
         lam_gk, lam_out, sub_scale = self._team_adjustment(state, player.team_id, gw)
         lam = lam_gk if player.position == scoring.GKP else lam_out
 
-        p_start = _start_after(_clamp01(role.p_start * avail), lam)
+        p_start = _start_after(_clamp01(self.role_p_start(player_id, gw) * avail), lam)
         p_sub = _clamp01(role.p_sub_given_no_start * sub_scale) if avail > 0 else 0.0
         p_appear = p_start + (1.0 - p_start) * p_sub
         p_60 = (
@@ -1751,6 +2047,26 @@ if __name__ == "__main__":
           % (params.recency_half_life_gws, params.recency_fit_logloss))
     print("  prior-season decay         : half-life %.1f current-season matches"
           % params.prior_decay_matches)
+    print("  recent-state log-loss      : %.4f with the correction, %.4f without"
+          % (params.recency_fit_logloss, params.recency_fit_logloss_no_state))
+    print("  recent-state terms         : %s"
+          % ", ".join("%s=%+.3f" % (k, params.recent_state_terms.get(k, 0.0))
+                      for k in RECENT_STATE_COLUMNS))
+    print("  recent-state horizon gamma : %s"
+          % ", ".join("%.2f" % v for v in params.recent_state_horizon_gamma))
+    if params.recent_state_terms:
+        print("  corrected P(start) by long-run rate and last two matches:")
+        print("        long-run |  both  last-only  sub-last  absent-last  absent-both")
+        for base in (0.10, 0.30, 0.50, 0.70, 0.85, 0.95):
+            cells = []
+            for vector in ([1, 0, 1, 1, 0], [1, 0, 1, 0, 0], [0, 1, 1, 1, 0],
+                           [0, 0, 1, 1, 0], [0, 0, 1, 0, 0]):
+                z = (params.recent_state_terms.get("const", 0.0)
+                     + params.recent_state_terms.get("logit_p", 1.0) * _logit(base)
+                     + sum(params.recent_state_terms.get(k, 0.0) * v
+                           for k, v in zip(RECENT_STATE_FEATURES, vector)))
+                cells.append("  %5.3f" % _expit(z))
+            print("        %8.2f |%s" % (base, "   ".join(cells)))
     print("  cohort baseline start rate : %.3f" % params.cohort_baseline_start_rate)
     print("  absence recovery (h=1..6)  : %s"
           % ", ".join("%.3f" % v for v in params.absence_recovery))

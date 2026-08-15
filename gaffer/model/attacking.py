@@ -11,7 +11,11 @@ Three ideas carry this module.
 2. **Fixture scaling is an elasticity, not a bucket.** A player's expected goals
    move with his team's expected goals, but not one-for-one — see
    ``fit_historical`` for the fitted exponents and the comment above
-   ``GOAL_ELASTICITY_PRIOR`` for what they mean.
+   ``GOAL_ELASTICITY_PRIOR`` for what they mean. Because that elasticity is a
+   *within-player* quantity, every observed rate is first divided by the
+   attacking strength of the club it was earned at (see ``TEAM_RATIO_MIN``);
+   otherwise club strength enters the projection twice and a move between clubs
+   never re-bases the player at all.
 
 3. **Penalties are a separate, explicit term.** Most public models either ignore
    penalties or double-count them, because Opta xG already contains 0.79 per
@@ -107,6 +111,27 @@ MIN_LAMBDA_RATIO, MAX_LAMBDA_RATIO = 0.25, 3.0
 BASELINE_MIN_MINUTES = 450.0
 BASELINE_MIN_PER_BUCKET = 12
 
+# --- team re-basing --------------------------------------------------------
+# A player's observed per-90 xG is not his rate at a neutral fixture: it is his
+# rate at *his own club's* average attacking level. The fixture elasticity is a
+# within-player quantity (see `_fe_poisson_elasticity`), so applying it to the
+# raw rate multiplies club strength in twice — once through the rate the club
+# helped produce, once through the fixture lambda. Every observed rate is
+# therefore divided by its club's attacking multiplier before it is blended,
+# shrunk or pooled into a baseline, and `project_breakdown` puts club strength
+# back exactly once through `fixture_scale`.
+#
+# The club multiplier is goals scored per match relative to the league, shrunk
+# towards 1. The pseudo-count follows from the noise: team goals are Poisson, so
+# the sampling variance of the ratio over m matches is about (1/lambda)/m ~=
+# 0.69/m, against a between-club variance of roughly 0.25^2. Equal weight lands
+# at m ~= 11 matches, which is also about when a new season's table stops being
+# a coin-flip.
+TEAM_RATIO_PRIOR_MATCHES = 11.0
+# Nobody's club is three times the league's attack. Rail it so a five-match
+# freak run cannot swing a projection by more than the spread of real clubs.
+TEAM_RATIO_MIN, TEAM_RATIO_MAX = 0.55, 1.75
+
 
 # ---------------------------------------------------------------------------
 # Fitted parameters
@@ -200,6 +225,11 @@ class PlayerRates:
     penalties_taken_prior: float = 0.0
     is_penalty_taker: bool = False
     was_penalty_taker: bool = False
+    # Attacking multiplier of the club(s) the rate was earned at, averaged over
+    # the blend with the same weights. 1.0 means a league-average attack; the
+    # rates above are expressed net of it. A player who changed clubs carries a
+    # blend of the two, which is exactly what re-bases him.
+    team_ratio: float = 1.0
     source_weights: Dict[str, float] = field(default_factory=dict)
     reason: str = ""
 
@@ -699,6 +729,15 @@ class AttackingModel:
         self._state: Optional["GameState"] = None
         self._prior_takers: Dict[int, int] = {}       # player code -> penalties_order
         self._prior_team_ratio: Dict[int, float] = {}  # player code -> team attack ratio
+        # team id -> attacking multiplier of the *current* season to date, and
+        # how many matches back it. Used to re-base season-to-date rates.
+        self._current_team_ratio: Dict[int, float] = {}
+        self._current_team_matches: int = 0
+        # True when the data source publishes penalties_order at all. When it
+        # does not (the historical archive does not), the current duty is
+        # unknown rather than known-absent, and last season's taker is the best
+        # available estimate.
+        self._penalty_orders_available: bool = True
         self._clamped: List[int] = []
 
     # -- fitting ------------------------------------------------------------
@@ -724,6 +763,14 @@ class AttackingModel:
         self.finishing_theta = self.fit_params.finishing_theta or 1.0
 
         self._load_prior_penalty_takers(state, cache)
+        self._build_current_team_ratios(state)
+        self._penalty_orders_available = any(
+            p.penalties_order is not None for p in state.players.values())
+        if not self._penalty_orders_available:
+            self.warnings.append(
+                "no player carries penalties_order; the current first-choice taker is "
+                "unknown and last season's taker is used instead. Penalty xG is still "
+                "stripped and added back, but a summer change of duty is invisible")
         sample = self._prior_season_sample(state)
         self._fit_baselines(sample)
         self._build_rates(state, sample)
@@ -779,6 +826,56 @@ class AttackingModel:
             code = id_to_code.get(element)
             if code is not None and pd.notna(code) and short in ratio:
                 self._prior_team_ratio[int(code)] = float(ratio[short])
+
+    # -- club attacking strength -------------------------------------------
+
+    @staticmethod
+    def _shrink_team_ratio(raw: float, matches: float) -> float:
+        """A club's goals-per-match ratio, shrunk towards parity by sample size."""
+        if matches <= 0 or not np.isfinite(raw):
+            return 1.0
+        w = matches / (matches + TEAM_RATIO_PRIOR_MATCHES)
+        return float(min(max(w * float(raw) + (1.0 - w), TEAM_RATIO_MIN), TEAM_RATIO_MAX))
+
+    def _build_current_team_ratios(self, state: "GameState") -> None:
+        """Each club's attacking multiplier over the season played so far.
+
+        Read off finished fixtures rather than off player rows, so it is exact
+        and needs no squad roll-up. Empty before a ball is kicked, which is the
+        honest answer: at GW1 every club's season-to-date attack is unknown and
+        the prior season carries the whole re-basing.
+        """
+        self._current_team_ratio = {}
+        goals: Dict[int, float] = {}
+        matches: Dict[int, int] = {}
+        for fx in state.fixtures:
+            if not fx.finished or fx.team_h_score is None or fx.team_a_score is None:
+                continue
+            for team, scored in ((fx.team_h, fx.team_h_score), (fx.team_a, fx.team_a_score)):
+                goals[team] = goals.get(team, 0.0) + float(scored)
+                matches[team] = matches.get(team, 0) + 1
+        total_matches = sum(matches.values())
+        if total_matches <= 0:
+            self._current_team_matches = 0
+            return
+        league_gpm = sum(goals.values()) / total_matches
+        self._current_team_matches = int(max(matches.values()))
+        self._current_team_ratio = {
+            team: self._shrink_team_ratio(
+                (goals[team] / matches[team]) / league_gpm, matches[team])
+            for team in matches
+        }
+
+    def _team_scale(self, ratio: float) -> Tuple[float, float]:
+        """(goal, assist) multipliers a club of this attacking strength confers.
+
+        Deliberately the same exponents `fixture_scale` uses, so dividing here
+        and multiplying there cancels exactly for a club playing an average
+        fixture. Anything else would leave a systematic tilt by club strength.
+        """
+        r = min(max(float(ratio), TEAM_RATIO_MIN), TEAM_RATIO_MAX)
+        return (r ** self.fit_params.goal_elasticity,
+                r ** self.fit_params.assist_elasticity)
 
     # -- sample construction ------------------------------------------------
 
@@ -842,6 +939,14 @@ class AttackingModel:
             pens = self._penalties_taken(minutes, missed, was_taker, team_ratio)
             xg = float(row.get("expected_goals") or 0.0)
             goals = float(row.get("goals_scored") or 0.0)
+            xg_np = max(xg - self.fit_params.penalty_xg * pens, 0.0)
+            xa = float(row.get("expected_assists") or 0.0)
+            # Only the immediately preceding season has a club attached; an
+            # older record is re-based at parity rather than at a club the
+            # player may have left two transfer windows ago.
+            club = (self._shrink_team_ratio(team_ratio, 38.0)
+                    if seasons_back == 1 else 1.0)
+            club_g, club_a = self._team_scale(club)
             rows.append({
                 "player_id": pid,
                 "position": player.position,
@@ -849,8 +954,16 @@ class AttackingModel:
                 "minutes": minutes,
                 "n90": minutes / 90.0,
                 "seasons_back": seasons_back,
-                "xg": max(xg - self.fit_params.penalty_xg * pens, 0.0),
-                "xa": float(row.get("expected_assists") or 0.0),
+                # Raw, for the finishing ratio, which is scale-free anyway.
+                "xg": xg_np,
+                "xa": xa,
+                # Re-based to a league-average club, for the rate blend and the
+                # price baselines. Both have to be on the same scale or the
+                # shrinkage target is systematically wrong for the expensive
+                # tiers, where almost every player is at a strong club.
+                "xg_adj": xg_np / club_g,
+                "xa_adj": xa / club_a,
+                "team_ratio": club,
                 "goals": max(goals - max(pens - missed, 0.0), 0.0),
                 "assists": float(row.get("assists") or 0.0),
                 "pens_taken": pens,
@@ -861,7 +974,13 @@ class AttackingModel:
     # -- baselines ----------------------------------------------------------
 
     def _fit_baselines(self, sample: pd.DataFrame) -> None:
-        """Pooled non-penalty xG90/xA90 by position and price bucket."""
+        """Pooled non-penalty xG90/xA90 by position and price bucket.
+
+        Built from the club-re-based columns. It has to be: price and club
+        strength are almost the same variable at the top of the market, so a
+        baseline pooled from raw rates would sit above every re-based player in
+        the £10m+ buckets and shrinkage would quietly push them all back up.
+        """
         self.baselines = {}
         usable = sample
         if len(usable):
@@ -881,7 +1000,8 @@ class AttackingModel:
             except ValueError:
                 bucket = pd.Series(np.zeros(len(sub), dtype=int), index=sub.index)
             grp = sub.assign(bucket=bucket).groupby("bucket")
-            agg = grp.agg(price=("price", "mean"), xg=("xg", "sum"), xa=("xa", "sum"),
+            agg = grp.agg(price=("price", "mean"), xg=("xg_adj", "sum"),
+                          xa=("xa_adj", "sum"),
                           n90=("n90", "sum"), n=("player_id", "size"))
             agg = agg[agg["n90"] > 0].sort_values("price")
             self.baselines[pos] = PriceBaseline(
@@ -953,13 +1073,30 @@ class AttackingModel:
 
         for pid, player in state.players.items():
             base_xg, base_xa = self.baseline(player.position, player.price)
-            is_taker = player.penalties_order == 1
+            prior_order = self._prior_takers.get(int(player.code))
+            was_taker = (prior_order == 1) if prior_order is not None \
+                else (player.penalties_order == 1)
+            if self._penalty_orders_available:
+                is_taker = player.penalties_order == 1
+            else:
+                # The duty is unknown, not known-absent. Treating it as absent
+                # is the worst of both worlds: `_prior_season_sample` still
+                # strips a taker's penalty xG out of his base rate, and nothing
+                # ever puts it back, so the highest-owned assets in the game get
+                # silently marked down. Last season's taker is the best estimate
+                # this data can support.
+                is_taker = was_taker
             team_ratio = self._prior_team_ratio.get(int(player.code), 1.0)
+            club_now = self._current_team_ratio.get(int(player.team_id), 1.0)
+            club_now_g, club_now_a = self._team_scale(club_now)
 
             values_xg: List[float] = []
             values_xa: List[float] = []
             weights: List[float] = []
             labels: List[str] = []
+            # Club multiplier each window's rate was already divided by, kept
+            # only so `explain` can say what was taken out.
+            ratios: List[float] = []
             n90_current = 0.0
             n90_prior = 0.0
             fin_goals = 0.0
@@ -968,13 +1105,14 @@ class AttackingModel:
             prior = prior_rows.get(pid)
             if prior is not None and float(prior["n90"]) > 0:
                 n90_prior = float(prior["n90"])
-                values_xg.append(float(prior["xg"]) / n90_prior)
-                values_xa.append(float(prior["xa"]) / n90_prior)
                 # A record two or more seasons old still beats no record at all,
                 # but it should not carry a current season's weight.
                 decay = 0.5 ** (int(prior["seasons_back"]) - 1)
                 weights.append(model.weight_prior_season * decay)
                 labels.append("prior")
+                values_xg.append(float(prior["xg_adj"]) / n90_prior)
+                values_xa.append(float(prior["xa_adj"]) / n90_prior)
+                ratios.append(float(prior["team_ratio"]))
                 fin_goals += float(prior["goals"])
                 fin_xg += float(prior["xg"])
 
@@ -984,10 +1122,11 @@ class AttackingModel:
                 n90 = std["minutes"] / 90.0
                 n90_current = n90
                 xg_np = max(std["xg"] - self.fit_params.penalty_xg * pens, 0.0)
-                values_xg.append(xg_np / n90)
-                values_xa.append(std["xa"] / n90)
                 weights.append(model.weight_season_to_date)
                 labels.append("season")
+                values_xg.append((xg_np / club_now_g) / n90)
+                values_xa.append((std["xa"] / club_now_a) / n90)
+                ratios.append(club_now)
                 fin_goals += max(std["goals"] - max(pens - std["missed"], 0.0), 0.0)
                 fin_xg += xg_np
 
@@ -996,19 +1135,22 @@ class AttackingModel:
                 pens = self._penalties_taken(recent["minutes"], recent["missed"], is_taker, team_ratio)
                 n90 = recent["minutes"] / 90.0
                 xg_np = max(recent["xg"] - self.fit_params.penalty_xg * pens, 0.0)
-                values_xg.append(xg_np / n90)
-                values_xa.append(recent["xa"] / n90)
                 weights.append(model.weight_recent_form)
                 labels.append("recent")
+                values_xg.append((xg_np / club_now_g) / n90)
+                values_xa.append((recent["xa"] / club_now_a) / n90)
+                ratios.append(club_now)
 
             total_w = sum(weights)
             if total_w <= 0:
                 raw_xg, raw_xa, n90_eff = base_xg, base_xa, 0.0
                 norm: List[float] = []
+                club_used = club_now
             else:
                 norm = [w / total_w for w in weights]
                 raw_xg = stats.weighted_blend(values_xg, weights)
                 raw_xa = stats.weighted_blend(values_xa, weights)
+                club_used = sum(w * r for w, r in zip(norm, ratios))
                 # Recent form is a subset of season-to-date, so the two share their
                 # sample: the current season contributes its 90s once, weighted by
                 # the two weights combined.
@@ -1021,12 +1163,12 @@ class AttackingModel:
             xg90 = stats.shrink(raw_xg, n90_eff, base_xg, shrink_n)
             xa90 = stats.shrink(raw_xa, n90_eff, base_xa, shrink_n)
 
-            prior_order = self._prior_takers.get(int(player.code))
-            was_taker = (prior_order == 1) if prior_order is not None else is_taker
-            parts = ["%s %.0f%%" % (l, 100 * w) for l, w in zip(labels, norm)] or ["baseline only"]
-            reason = "%s, %.1f x90 -> %d%% own rate; %s" % (
+            parts = ["%s %.0f%%" % (l, 100 * w) for l, w in zip(labels, norm)] \
+                or ["baseline only"]
+            reason = "%s, %.1f x90 -> %d%% own rate; club x%.2f; %s" % (
                 ", ".join(parts), n90_eff,
                 int(round(100 * (n90_eff / (n90_eff + shrink_n)) if n90_eff > 0 else 0)),
+                club_used,
                 "penalties" if is_taker else "no penalties",
             )
             if is_taker and not was_taker:
@@ -1049,6 +1191,7 @@ class AttackingModel:
                 penalties_taken_prior=float(prior["pens_taken"]) if prior is not None else 0.0,
                 is_penalty_taker=is_taker,
                 was_penalty_taker=bool(was_taker),
+                team_ratio=float(club_used),
                 source_weights=dict(zip(labels, norm)),
                 reason=reason,
             )
@@ -1238,6 +1381,8 @@ class AttackingModel:
             "  blend: %s" % r.reason,
             "  xG90 %.3f (raw %.3f, baseline %.3f) | xA90 %.3f (raw %.3f, baseline %.3f)"
             % (r.xg90, r.raw_xg90, r.baseline_xg90, r.xa90, r.raw_xa90, r.baseline_xa90),
+            "  rates are net of a club attack of x%.2f; fixture_scale puts club "
+            "strength back" % r.team_ratio,
             "  finishing x%.3f" % r.finishing,
         ]
         if r.is_penalty_taker:
@@ -1357,6 +1502,16 @@ if __name__ == "__main__":
         sg, sa = model.fixture_scale(lam)
         print("  team lambda %.2f -> goals x%.3f, assists x%.3f, penalties %.4f/match"
               % (lam, sg, sa, model.penalty_rate(lam)))
+
+    print("\n=== club re-basing (rates are stated net of these) ===")
+    print("  current-season club ratios: %d clubs over %d matches each"
+          % (len(model._current_team_ratio), model._current_team_matches))
+    by_club: Dict[str, float] = {}
+    for rates in model.rates_by_player.values():
+        club = state.short_name(state.players[rates.player_id].team_id)
+        by_club[club] = max(by_club.get(club, 0.0), rates.team_ratio)
+    for club in sorted(by_club, key=lambda c: -by_club[c])[:5]:
+        print("    %-4s up to x%.2f" % (club, by_club[club]))
 
     # --- build GW1 contexts -------------------------------------------------
     gw = state.current_gw

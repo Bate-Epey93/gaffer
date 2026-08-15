@@ -25,6 +25,21 @@ Spurs player in 2026/27.
 exponent ~0.63. A team expected to concede twice as much does not face twice
 the shots, so the save-heavy-keeper effect is real but bounded.
 
+**Clean sheets and conceded points are settled over the minutes the player was
+actually on the pitch**, not over the whole match. FPL's rule is "no goal
+conceded while on the pitch, having played 60+", so a defender withdrawn on the
+hour keeps a clean sheet his team goes on to lose. Measured over 2024/25 and
+2025/26, the ratio of the player clean-sheet rate to his team's full-match
+clean-sheet rate runs 1.55 at 60-69 minutes, 1.36 at 70-79, 1.19 at 80-89 and
+1.005 at exactly 90 — that last row is the control that says this is the rule
+and not a selection effect, and 338 of 3,280 appearances in the 60-79 band kept
+a clean sheet the team did not while *zero* went the other way. Goals credited
+against the player track the same fractions (0.69 / 0.77 / 0.85 / 1.00 of the
+team's match total). 16% of defender starts and 44% of midfielder starts end
+before the 88th minute, so treating everyone as a 90-minute player understates
+clean sheets and overstates conceded points for a large, identifiable slice of
+the population.
+
 Everything is fitted from football-data.co.uk shot counts and the vaastav
 per-match archive; the constants recorded at the bottom of this docstring's
 module are the values those fits produced, kept only as an offline fallback.
@@ -76,6 +91,14 @@ FALLBACK = {
 # the one number here that no FPL feed exposes directly, and it is only used to
 # split an observed penalty-save rate into "penalties faced" x "save rate".
 PEN_CONVERSION = 0.79
+
+# Mean minutes of a start that ends before the hour: 47.3 over the 1,169 such
+# starts in 2024/25-2025/26 (mostly half-time hooks and first-half injuries).
+# Only used to back out E[minutes | reached 60] from E[minutes | started], which
+# is the quantity the clean-sheet rule needs and the minutes model does not
+# publish. Feeding 47.3 back through that identity reproduces the realised
+# E[minutes | 60+] to within 0.2 minutes for DEF, MID and FWD alike.
+SHORTENED_START_MINUTES = 47.3
 
 
 # ---------------------------------------------------------------------------
@@ -594,8 +617,13 @@ class DefendingModel:
         played = max(0.0, min(90.0, minutes))
         lam_saves = sot * self.fit_params.sot_proxy_ratio * share * played / 90.0
         p_60 = 1.0 if played >= 60 else 0.0
-        xp_cs = scoring.clean_sheet_points(position, stats.p_clean_sheet(lam), p_60)
-        xp_gc = scoring.expected_goals_conceded_points(position, lam, p_60)
+        # Same on-pitch settlement as `project`; here the minutes are known
+        # exactly, so the fraction is not an expectation.
+        on_pitch = played / 90.0
+        xp_cs = scoring.clean_sheet_points(
+            position, stats.p_clean_sheet(lam) ** on_pitch, p_60
+        )
+        xp_gc = scoring.expected_goals_conceded_points(position, lam * on_pitch, p_60)
         xp_sv = (
             scoring.expected_save_points(lam_saves)
             if position == scoring.GKP else 0.0
@@ -679,14 +707,57 @@ class DefendingModel:
         )
 
     # -- projections -------------------------------------------------------
+    def on_pitch_fraction(self, ctx: "FixtureContext") -> float:
+        """``E[minutes played | the player reached 60] / 90``, in ``[2/3, 1]``.
+
+        The minutes model publishes ``p_start``, ``p_60`` and ``xmins``, from
+        which ``minutes_split`` recovers ``E[minutes | started]``. What the
+        clean-sheet rule needs is ``E[minutes | reached 60]``, which is the same
+        quantity with the sub-60 starts removed:
+
+            E[m | start] = q E[m | m>=60] + (1-q) E[m | start, m<60]
+
+        with ``q = P(reach 60 | start) = p_60 / p_start``. The last term is the
+        fitted ``SHORTENED_START_MINUTES``. Substitutes are ignored on purpose —
+        a bench cameo of ~20 minutes essentially never reaches the hour, so all
+        of the 60+ mass belongs to the start branch.
+        """
+        mf = self._minutes(ctx)
+        if mf is None:
+            return 1.0
+        p_start, m_start, _p_sub, _m_sub = minutes_split(mf, self.config)
+        p_60 = max(0.0, min(1.0, float(mf.p_60)))
+        if p_start <= 1e-6 or p_60 <= 1e-9:
+            return 1.0
+        q = min(1.0, p_60 / p_start)
+        if q <= 1e-6:
+            return 1.0
+        m_60 = (m_start - (1.0 - q) * SHORTENED_START_MINUTES) / q
+        return max(60.0, min(90.0, m_60)) / 90.0
+
+    def player_clean_sheet(self, ctx: "FixtureContext") -> float:
+        """P(no goal conceded while this player was on the pitch).
+
+        Under a Poisson process the survival over ``m`` of the 90 minutes is
+        ``exp(-lambda m/90) = P(0 over 90) ** (m/90)``, so raising the match
+        probability to the on-pitch fraction applies the rule *and* keeps
+        whatever the team model's Dixon-Coles correction did to ``P(0-0)``.
+        It is also the only channel by which a nailed 90-minute defender and a
+        regularly-hooked one are told apart at all: the flat ``p_60`` gate gives
+        both of them the same clean-sheet probability.
+        """
+        return self._match_clean_sheet(ctx) ** self.on_pitch_fraction(ctx)
+
     def project_clean_sheet(self, player_id: int, ctx: "FixtureContext") -> float:
-        """P(team keeps a clean sheet AND the player is on for 60+)."""
-        return self._match_clean_sheet(ctx) * self._p_60(ctx)
+        """P(clean sheet while on the pitch AND the player is on for 60+)."""
+        return self.player_clean_sheet(ctx) * self._p_60(ctx)
 
     def project_conceded_points(self, player_id: int, ctx: "FixtureContext") -> float:
         player = self._player(player_id, ctx)
         return scoring.expected_goals_conceded_points(
-            player.position, self._lambda_conceded(ctx), self._p_60(ctx)
+            player.position,
+            self._lambda_conceded(ctx) * self.on_pitch_fraction(ctx),
+            self._p_60(ctx),
         )
 
     def project_saves(self, player_id: int, ctx: "FixtureContext") -> float:
@@ -740,9 +811,14 @@ class DefendingModel:
         p_start, m_start, p_sub, m_sub = minutes_split(self._minutes(ctx), self.config)
         p_60 = self._p_60(ctx)
 
-        p_clean_sheet = p_cs_match * p_60
-        xp_cs = scoring.clean_sheet_points(pos, p_cs_match, p_60)
-        xp_conceded = scoring.expected_goals_conceded_points(pos, lam_conceded, p_60)
+        # Settle both terms over the minutes actually played, not the full match.
+        on_pitch = self.on_pitch_fraction(ctx)
+        p_cs_on_pitch = p_cs_match ** on_pitch
+        p_clean_sheet = p_cs_on_pitch * p_60
+        xp_cs = scoring.clean_sheet_points(pos, p_cs_on_pitch, p_60)
+        xp_conceded = scoring.expected_goals_conceded_points(
+            pos, lam_conceded * on_pitch, p_60
+        )
 
         lam_saves = 0.0
         xp_saves = 0.0
@@ -787,6 +863,7 @@ class DefendingModel:
             "sot_faced": sot_faced,
             "save_share": share,
             "p_60": p_60,
+            "on_pitch_fraction": on_pitch,
         }
         cross = self.saves_cross_check(player_id, ctx)
         if cross is not None:

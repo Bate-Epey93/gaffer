@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-15T02:35:11.609062+00:00",
+  "generated_at": "2026-08-15T04:02:05.569643+00:00",
   "target_season": "2025-26",
   "source_season": "2024-25",
   "fitted_from": "vaastav merged_gw 2024-25",
@@ -54,7 +54,7 @@
         "goals": 0.0,
         "assists": 11.329842412377307,
         "clean_sheet": 15.568286115774667,
-        "saves": 3.1672773675589694,
+        "saves": 3.111518245039313,
         "penalties_saved": 8.25378025806989,
         "cbi": 0.0,
         "recoveries": 0.0,
@@ -194,14 +194,15 @@
     }
   },
   "adjustments_2026_27": {
-    "cbi_scale": 0.6666666666666666,
+    "patch_form": "additive: fitted coefficient + (2026/27 table value - 2025/26 table value), so the fitted correlate is carried through unscaled",
+    "cbi_delta": -0.16666666666666669,
     "gk_save_p_in_box": 0.75,
     "gk_save_p_big_chance": 0.25,
     "gk_save_nominal_2526": 2.0,
     "gk_save_nominal_2627": 3.0,
-    "gk_save_scale": 1.5,
-    "gk_save_scale_bounds": [
-      1.0,
+    "gk_save_delta": 1.0,
+    "gk_save_delta_bounds": [
+      0.0,
       2.0
     ],
     "penalty_save_delta": -1.0,
@@ -214,7 +215,7 @@
         ],
         "saves": [
           2.111518245039313,
-          3.1672773675589694
+          3.111518245039313
         ],
         "penalties_saved": [
           9.25378025806989,
@@ -267,8 +268,8 @@
   },
   "adjustment_notes": {
     "tackled": "-1 BPS for being tackled removed. UNMODELLED: no dataset carries 'times tackled'. Absorbed in the residual; makes attackers marginally under-projected.",
-    "cbi": "1 BPS per 3 clearances/blocks/interceptions (was per 2). Fitted CBI coefficient scaled by 2/3.",
-    "gk_saves": "Any save 2 BPS, +1 inside the box, +1 from a big chance. Fitted save coefficient scaled by (2 + p_in_box + p_big_chance) / 2. Largest uncertainty in the model; bounded ratio [1.0, 2.0].",
+    "cbi": "1 BPS per 3 clearances/blocks/interceptions (was per 2). -1/6 BPS per action added to the fitted CBI coefficient.",
+    "gk_saves": "Any save 2 BPS, +1 inside the box, +1 from a big chance. (p_in_box + p_big_chance) BPS added to the fitted save coefficient. Largest uncertainty in the model; bounded delta [0.0, 2.0].",
     "penalty_save": "Penalty save BPS 8 -> 7. Flat -1 on the fitted coefficient."
   },
   "count_dispersion": {
@@ -515,8 +516,8 @@
     "Coefficients are 2025/26 fits with four documented 2026/27 rule patches applied. Call BonusModel.refit_from_current_season() once 2026/27 gameweeks complete.",
     "The removal of the -1 BPS for being tackled is unmodelled: no available dataset carries times-tackled.",
     "The goalkeeper save uplift assumes p(save in box)=0.75 and p(save from big chance)=0.25. The rule bounds the nominal per-save value on [2.0, 4.0].",
-    "gk_save_marginal_diagnostic measures what a save was actually worth in the source season. If it sits well above GK_SAVE_NOMINAL_2526 (2.0), the 2026/27 save uplift of x1.50 is too aggressive and keeper bonus here is over-projected.",
-    "Per-fixture expected bonus is capped at 6.0. Real FPL pays more when BPS ties (observed 2025/26 mean 6.37, max 9); the model's continuous noise makes ties measure-zero, so 6.0 is a deliberate floor-of-reality, never an over-estimate."
+    "gk_save_marginal_diagnostic measures what a save was actually worth in the source season. If it sits well above GK_SAVE_NOMINAL_2526 (2.0) then FPL's own table understated the real value, and the +1.00 BPS added per save here is on top of a coefficient that was already generous.",
+    "Per-fixture expected bonus is the simulated pot, not a flat 6.0: BPS is drawn as an integer and FPL's tie rules are applied, so ties pay 7, 8 or 9 at the rate they arise (2025/26 actual: mean 6.366, max 9). BONUS_POT_SANITY_LIMIT (9.0) guards the sampler; it is not a rule of the game."
   ],
   "warnings": []
 }

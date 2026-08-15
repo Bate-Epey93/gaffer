@@ -47,6 +47,7 @@ import json
 import logging
 import math
 import os
+import textwrap
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -929,7 +930,13 @@ def ep_contamination_check(frame: pd.DataFrame) -> Dict[str, Any]:
 
 
 def _fixture_bonus_check(engine: XPEngine, gw: int) -> Tuple[float, int]:
-    """Largest per-fixture expected bonus total, and how many fixtures broke 6."""
+    """Largest per-fixture expected bonus pot, and how many broke the limit.
+
+    A fixture pays 3+2+1 = 6 only when the top three BPS scores are distinct;
+    ties pay 7, 8 or 9, and 2025/26 averaged 6.366 per fixture. The limit here
+    is ``bonus_mod.BONUS_POT_SANITY_LIMIT``, not 6 - a breach means the ranker
+    is broken, which is what this is guarding, whereas a pot of 6.4 is the game.
+    """
     worst = 0.0
     breaches = 0
     for (fixture_id, bundle_gw), bundle in engine._bundles.items():
@@ -937,7 +944,7 @@ def _fixture_bonus_check(engine: XPEngine, gw: int) -> Tuple[float, int]:
             continue
         total = sum(p.xp_bonus for p in bundle.values())
         worst = max(worst, total)
-        if total > 6.0 + 1e-6:
+        if total > bonus_mod.BONUS_POT_SANITY_LIMIT + 1e-6:
             breaches += 1
     return worst, breaches
 
@@ -1122,6 +1129,230 @@ PREDICTOR_LABELS: Dict[str, str] = {
     "baseline_price": "(d) price (rank only)",
 }
 
+# ---------------------------------------------------------------------------
+# Which rows the verdict is allowed to rest on
+# ---------------------------------------------------------------------------
+#
+# The full universe is every player with a fixture, and roughly three fifths of
+# it is players who never came off the bench and scored exactly zero. Rank
+# correlation over that set is mostly a test of "can you predict a zero", which
+# the trivial baseline "what he scored last week" also answers with a zero, for
+# free and perfectly. A model can therefore lose the full-universe table while
+# being strictly more useful, so that table is a diagnostic here and nothing is
+# concluded from it.
+#
+# Every decision an FPL manager makes — transfer, captain, bench order — is made
+# among players he expects to play. Those are the rows the model is answerable
+# for, and the verdict is judged on them.
+
+#: Subsets the headline verdict is judged on, in the order they are reported.
+DECISION_SUBSETS: Tuple[str, ...] = ("appeared", "likely_starters")
+
+#: Every subset the report cuts, decision-relevant or not.
+SUBSET_KEYS: Tuple[str, ...] = DECISION_SUBSETS + ("full_universe",)
+
+SUBSET_LABELS: Dict[str, str] = {
+    "appeared": "players who actually took the field",
+    "likely_starters": "likely starters (model p_start >= 0.5)",
+    "full_universe": "every player with a fixture",
+}
+
+SUBSET_NOTES: Dict[str, str] = {
+    "appeared": (
+        "Conditions on the outcome, so it is not a shortlist you could draw up at "
+        "the deadline. What it does isolate is the points model: given that a man "
+        "played, were his points ranked correctly? A loss here is a football "
+        "problem, not a minutes problem."),
+    "likely_starters": (
+        "Chosen before kickoff, from the model's own p_start, so this is the "
+        "ex-ante version of the same question and the closest thing in this report "
+        "to a real transfer shortlist. It is the subset that should carry the most "
+        "weight."),
+    "full_universe": (
+        "Diagnostic only. Most of these rows are players who never took the field "
+        "and scored zero, and the trivial baselines predict zero for them too, so "
+        "they collect rank correlation for free. Nothing is concluded from this "
+        "table."),
+}
+
+#: Where each subset's predictor table lives in the report dict.
+SUBSET_REPORT_KEYS: Dict[str, str] = {
+    "appeared": "predictors_appeared_diagnostic",
+    "likely_starters": "predictors_likely_starters",
+    "full_universe": "predictors",
+}
+
+
+def _decisive_comparison(comparisons: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The one metric a verdict turns on: per-gameweek rank correlation.
+
+    Mirrors ``metrics.verdict``, which prefers the per-gameweek mean and falls
+    back to the pooled value. Ranking players within a gameweek is the question
+    a manager actually asks; the pooled number also rewards knowing which
+    gameweeks are high-scoring, which nobody can act on.
+    """
+    if not comparisons:
+        return None
+    return comparisons.get("spearman_per_gw_mean") or comparisons.get("spearman")
+
+
+def _headline_verdict(
+    judgements: Dict[str, Dict[str, Any]],
+    sizes: Dict[str, Dict[str, int]],
+    degenerate: Dict[str, Any],
+    contamination: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Judge the model on the decision-relevant subsets, and say so out loud.
+
+    Every line carries the subset it came from, because the same model beats the
+    baselines on one cut and loses on another, and a verdict that does not name
+    its subset is not a verdict. ``beats_all`` is true only if the model beats
+    every baseline on *every* decision-relevant subset — losing on one and
+    winning on another is a loss.
+    """
+    lines: List[str] = []
+    losses: List[Dict[str, Any]] = []
+    basis = [k for k in DECISION_SUBSETS if judgements.get(k, {}).get("detail")]
+
+    if not basis:
+        # Only reachable if both decision subsets were too small to score, which
+        # means a handful of gameweeks were replayed. Say that rather than fall
+        # back to the degenerate table and pretend it settled something.
+        return {
+            "beats_all": False,
+            "basis": [],
+            "lines": ["NO VERDICT: neither decision-relevant subset (appeared, "
+                      "likely starters) had enough rows to score. Nothing here is "
+                      "judged on the full universe, which is degenerate."],
+            "losses": [],
+            "by_subset": judgements,
+            "degenerate_full_universe": degenerate,
+        }
+
+    lines.append(
+        "JUDGED ON: %s. Transfers and captaincy are chosen among players expected "
+        "to play, so those are the rows the model is answerable for. rho/GW below is "
+        "the mean within-gameweek rank correlation, which is the metric each "
+        "comparison turns on."
+        % " and ".join("%s (n=%d)" % (k.replace("_", " "), sizes[k]["rows"]) for k in basis))
+
+    for key in basis:
+        judgement = judgements[key]
+        size = sizes[key]
+        lines.append("")
+        lines.append("[%s] %s — %d rows over %d gameweek(s)"
+                     % (key.upper(), SUBSET_LABELS[key], size["rows"], size["gameweeks"]))
+        lines.append("    " + SUBSET_NOTES[key])
+        for baseline, comparisons in judgement["detail"].items():
+            decisive = _decisive_comparison(comparisons)
+            if decisive is None:
+                continue
+            better = bool(decisive["model_better"])
+            if not better:
+                losses.append({
+                    "subset": key,
+                    "baseline": baseline,
+                    "label": PREDICTOR_LABELS.get(baseline, baseline),
+                    "model": decisive["model"],
+                    "baseline_value": decisive["baseline"],
+                    "delta": decisive["delta"],
+                })
+            lines.append(
+                "    vs %-22s %-6s rho/GW %.4f vs %.4f (%+.4f), wins %d/%d metrics"
+                % (PREDICTOR_LABELS.get(baseline, baseline),
+                   "BEATS" if better else "LOSES",
+                   decisive["model"], decisive["baseline"], decisive["delta"],
+                   comparisons.get("_won", 0), comparisons.get("_of", 0)))
+        lines.append("    => on this subset the model %s every baseline"
+                     % ("BEATS" if judgement["beats_all"] else "DOES NOT BEAT"))
+
+    # FPL's own ep is scored on the full universe, over the gameweeks the archive
+    # recorded it, and only counts when the contamination check clears it. That
+    # analysis is untouched; this only decides whether its result is allowed to
+    # move the headline.
+    ep_entry = (judgements.get("full_universe") or {}).get("detail", {}).get("baseline_ep_next")
+    ep_clean = bool(contamination.get("checked")) and not contamination.get("contaminated")
+    ep_ok = True
+    if ep_entry is not None:
+        lines.append("")
+        if not contamination.get("checked"):
+            lines.append("[EP] (c) FPL's own ep was not scored: the archive recorded no "
+                         "usable expected-points column.")
+        elif not ep_clean:
+            lines.append(
+                "[EP] (c) FPL's own ep is EXCLUDED from the verdict: the contamination "
+                "check shows the archived value was recomputed after the gameweek was "
+                "played, so it is not the forecast the API offered at the deadline. Its "
+                "comparison is still printed under the full-universe diagnostic.")
+        else:
+            decisive = _decisive_comparison(ep_entry)
+            if decisive is not None:
+                better = bool(decisive["model_better"])
+                if not better:
+                    ep_ok = False
+                    losses.append({
+                        "subset": "ep_gameweeks",
+                        "baseline": "baseline_ep_next",
+                        "label": PREDICTOR_LABELS["baseline_ep_next"],
+                        "model": decisive["model"],
+                        "baseline_value": decisive["baseline"],
+                        "delta": decisive["delta"],
+                    })
+                lines.append(
+                    "[EP_GAMEWEEKS] vs %s %s rho/GW %.4f vs %.4f (%+.4f), on the full "
+                    "universe restricted to the gameweeks the archive recorded ep"
+                    % (PREDICTOR_LABELS["baseline_ep_next"], "BEATS" if better else "LOSES",
+                       decisive["model"], decisive["baseline"], decisive["delta"]))
+
+    beats_all = bool(all(judgements[k]["beats_all"] for k in basis) and ep_ok)
+
+    lines.append("")
+    if beats_all:
+        lines.append("HEADLINE: the model BEATS every baseline on every decision-relevant "
+                     "subset (%s)." % ", ".join(k.replace("_", " ") for k in basis))
+    else:
+        lines.append("HEADLINE: the model does NOT beat every baseline where the decisions "
+                     "are made.")
+        for loss in losses:
+            lines.append("  on %s it loses to %s on rho/GW: %.4f vs %.4f (%+.4f)."
+                         % (loss["subset"].replace("_", " "), loss["label"],
+                            loss["model"], loss["baseline_value"], loss["delta"]))
+        won = [k for k in basis if judgements[k]["beats_all"]]
+        lost = [k for k in basis if not judgements[k]["beats_all"]]
+        if won and lost:
+            lines.append(
+                "  It does beat every baseline on %s, but that subset conditions on the "
+                "outcome. Winning there and losing on %s means the points ranking is "
+                "sound and the ex-ante shortlist is not; the second is what a transfer "
+                "is actually picked from, so the honest reading is that the model is not "
+                "yet proven."
+                % (", ".join(k.replace("_", " ") for k in won),
+                   ", ".join(k.replace("_", " ") for k in lost)))
+        lines.append("  Do not report this model as beating the baselines.")
+
+    if degenerate.get("rows"):
+        lines.append("")
+        lines.append(
+            "[FULL_UNIVERSE] diagnostic, not judged: %d of %d rows (%.0f%%) are players who "
+            "did not take the field, and %d of those scored exactly zero. The last-gameweek "
+            "baseline also says zero for %.0f%% of them, so it ranks that pile correctly for "
+            "free. That is why the full-universe table can show the model losing to a "
+            "baseline nobody would use, and why nothing is concluded from it."
+            % (degenerate["rows"], degenerate["total_rows"], 100.0 * degenerate["share"],
+               degenerate["rows_scoring_zero"],
+               100.0 * degenerate["share_last_gw_baseline_zero"]))
+        for line in (judgements.get("full_universe") or {}).get("lines", []):
+            lines.append("    " + line)
+
+    return {
+        "beats_all": beats_all,
+        "basis": basis,
+        "lines": lines,
+        "losses": losses,
+        "by_subset": judgements,
+        "degenerate_full_universe": degenerate,
+    }
+
 
 def _comparable_gameweeks(
     frame: pd.DataFrame, predictors: Sequence[Tuple[str, str, bool]]
@@ -1140,6 +1371,54 @@ def _comparable_gameweeks(
         if usable:
             out.append(int(gw))
     return sorted(out)
+
+
+def _bonus_component_report(frame: pd.DataFrame) -> Dict[str, Any]:
+    """Score the bonus component on its own, against bonus actually awarded.
+
+    Bonus is worth up to 3 points a match but only about a tenth of a projected
+    total, so a change to the bonus model that is real is still swamped in the
+    headline rank correlation by the other ninety percent. Scored directly
+    against the ``bonus`` column it is measurable: the season total says whether
+    the level is right, the per-gameweek rank correlation and top-20 hit rate
+    say whether the ordering is, and the appeared-only cut removes the ~17k rows
+    where predicting zero bonus is trivially correct.
+    """
+    if "xp_bonus" not in frame.columns or "bonus" not in frame.columns:
+        return {}
+    out: Dict[str, Any] = {}
+    for label, sub in (
+        ("all", frame),
+        ("appeared", frame[frame.get("played", 0) > 0]),
+        ("likely_starters", frame[frame["p_start"] >= 0.5]),
+    ):
+        if len(sub) < 50:
+            continue
+        pred = pd.to_numeric(sub["xp_bonus"], errors="coerce").fillna(0.0).values
+        actual = pd.to_numeric(sub["bonus"], errors="coerce").fillna(0.0).values
+        per_gw_rho: List[float] = []
+        per_gw_hit: List[float] = []
+        for _, grp in sub.groupby("gw"):
+            if len(grp) < 2:
+                continue
+            p = pd.to_numeric(grp["xp_bonus"], errors="coerce").fillna(0.0)
+            a = pd.to_numeric(grp["bonus"], errors="coerce").fillna(0.0)
+            per_gw_rho.append(M.spearman(p, a))
+            per_gw_hit.append(M.hit_rate_top_n(p, a, 20))
+        good = [v for v in per_gw_rho if v == v]
+        out[label] = {
+            "n": int(len(sub)),
+            "spearman": M.spearman(pred, actual),
+            "spearman_per_gw_mean": float(np.mean(good)) if good else float("nan"),
+            "spearman_per_gw": [round(v, 6) if v == v else None for v in per_gw_rho],
+            "rmse": M.rmse(pred, actual),
+            "mae": M.mae(pred, actual),
+            "predicted_total": float(np.sum(pred)),
+            "actual_total": float(np.sum(actual)),
+            "top20_hit_rate": float(np.mean(per_gw_hit)) if per_gw_hit else float("nan"),
+            "top20_hit_rate_per_gw": [round(v, 4) for v in per_gw_hit],
+        }
+    return out
 
 
 def _assemble_report(
@@ -1173,13 +1452,15 @@ def _assemble_report(
                  else (M.full_report(frame, predictors) if len(ep_gws) else {}))
 
     # The full universe is dominated by players nobody would consider owning;
-    # a second cut over likely starters is where the model earns its keep.
+    # the cut over likely starters is the ex-ante shortlist a transfer is made
+    # from, and it is one of the two subsets the verdict is judged on.
     starters = frame[frame["p_start"] >= 0.5]
     starters_report = M.full_report(starters, headline_predictors) if len(starters) > 50 else {}
 
-    # Diagnostic only, and it conditions on the outcome: restricted to players
-    # who really did play, it separates "can it rank points" from "can it
-    # predict who plays". Never quote it as a decision metric.
+    # Conditions on the outcome, so it is not a set anyone could pick from at the
+    # deadline — but restricted to players who really did play it separates "can
+    # it rank points" from "can it predict who plays", and that is a decision the
+    # model has to get right. Judged, with the caveat stated every time.
     appeared = frame[frame.get("played", 0) > 0]
     appeared_report = (M.full_report(appeared, headline_predictors)
                        if len(appeared) > 50 else {})
@@ -1188,9 +1469,12 @@ def _assemble_report(
         "p_60": M.calibration(frame, "p_60", "played_60"),
         "p_appear": M.calibration(frame, "p_appear", "played"),
     }
+    bonus_component = _bonus_component_report(frame)
     if "started" in frame.columns:
         calibration["p_start"] = M.calibration(frame, "p_start", "started")
 
+    # The full-universe judgement. Kept in full, but demoted to a diagnostic:
+    # see DECISION_SUBSETS for why nothing is concluded from it.
     judgement = M.verdict(overall)
     contamination = ep_contamination_check(frame) if ep_gws else {
         "checked": False, "contaminated": False, "per_gw": []}
@@ -1209,6 +1493,53 @@ def _assemble_report(
                         % (line, len(ep_gws),
                            "; EXCLUDED from the verdict, see contamination check"
                            if contamination.get("contaminated") else ""))
+
+    # How degenerate the full universe actually is, measured rather than
+    # asserted: the non-appearance rows, what they scored, and how often the
+    # trivial baseline gets them right by predicting zero.
+    non_appearance = frame[frame.get("played", 0) <= 0]
+    degenerate = {
+        "rows": int(len(non_appearance)),
+        "total_rows": int(len(frame)),
+        "share": float(len(non_appearance) / len(frame)) if len(frame) else float("nan"),
+        "mean_actual_points": (float(non_appearance["actual_points"].mean())
+                               if len(non_appearance) else float("nan")),
+        # Exact equality, not "<= 0": a handful of these rows carry a negative
+        # score, and rounding them in would turn 99.99% into a false 100%.
+        "rows_scoring_zero": int((non_appearance["actual_points"] == 0).sum()),
+        "share_last_gw_baseline_zero": (
+            float((non_appearance["baseline_last_gw"] == 0).mean())
+            if len(non_appearance) and "baseline_last_gw" in non_appearance.columns
+            else float("nan")),
+    }
+
+    subset_frames = {"appeared": appeared, "likely_starters": starters, "full_universe": frame}
+    subset_reports = {"appeared": appeared_report, "likely_starters": starters_report,
+                      "full_universe": overall}
+    sizes = {
+        key: {"rows": int(len(sub)), "gameweeks": int(sub["gw"].nunique()),
+              "players": int(sub["player_id"].nunique())}
+        for key, sub in subset_frames.items()
+    }
+    judgements = {
+        "appeared": M.verdict(appeared_report) if appeared_report else {},
+        "likely_starters": M.verdict(starters_report) if starters_report else {},
+        "full_universe": judgement,
+    }
+    headline = _headline_verdict(judgements, sizes, degenerate, contamination)
+    subsets = [
+        {
+            "key": key,
+            "label": SUBSET_LABELS[key],
+            "note": SUBSET_NOTES[key],
+            "predictors_key": SUBSET_REPORT_KEYS[key],
+            "decision_relevant": key in DECISION_SUBSETS,
+            "judged": key in headline["basis"],
+            **sizes[key],
+        }
+        for key in SUBSET_KEYS if subset_reports[key]
+    ]
+
     report: Dict[str, Any] = {
         "season": replay.season,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1219,6 +1550,8 @@ def _assemble_report(
             "gameweeks": int(frame["gw"].nunique()),
             "double_gameweek_rows": int((frame["n_fixtures"] > 1).sum()),
             "likely_starter_rows": int(len(starters)),
+            "appeared_rows": int(len(appeared)),
+            "non_appearance_rows": int(len(non_appearance)),
             "comparison_gameweeks": comparable,
             "gameweeks_excluded_from_comparison": skipped,
         },
@@ -1243,11 +1576,18 @@ def _assemble_report(
         "ep_gameweeks": ep_gws,
         "ep_contamination": contamination,
         "calibration": calibration,
-        "verdict": judgement,
+        "bonus_component": bonus_component,
+        "subsets": subsets,
+        # The headline verdict, judged on the decision-relevant subsets only.
+        # `verdict["by_subset"]["full_universe"]` is the old full-universe
+        # judgement, unchanged, for anything that still wants it.
+        "verdict": headline,
+        "verdict_full_universe": judgement,
         "per_gw": per_gw,
         "invariants": {
             "bonus_worst_fixture_total": meta["bonus_worst_fixture_total"],
-            "bonus_breaches_over_6": meta["bonus_breaches"],
+            "bonus_pot_limit": bonus_mod.BONUS_POT_SANITY_LIMIT,
+            "bonus_breaches_over_limit": meta["bonus_breaches"],
         },
         "warnings": replay.warnings,
         "engine_warning_counts": meta["engine_warnings"],
@@ -1274,6 +1614,59 @@ def write_report(report: Dict[str, Any], path: Optional[str] = None) -> str:
 # ---------------------------------------------------------------------------
 # Readable summary
 # ---------------------------------------------------------------------------
+
+
+#: Widest line the tables produce (``metrics.comparison_table``'s header), so
+#: prose wraps to the same right edge instead of a narrower one.
+RENDER_WIDTH = 94
+
+
+def _rule_heading(title: str) -> str:
+    text = "--- %s " % title
+    return text + "-" * max(3, RENDER_WIDTH - len(text))
+
+
+def _wrap(text: str, indent: str = "", hang: Optional[str] = None) -> List[str]:
+    """Wrap prose to ``RENDER_WIDTH``, keeping the line's own indentation.
+
+    A line whose body contains a run of two or more spaces is column-padded —
+    a table row — and is emitted verbatim however long it is, because breaking
+    it would split a number across two lines and destroy the alignment that
+    makes it readable.
+    """
+    if not text:
+        return []
+    own = text[: len(text) - len(text.lstrip())]
+    body = text.strip()
+    prefix = indent + own
+    following = hang if hang is not None else prefix + "  "
+    if "  " in body or len(prefix) + len(body) <= RENDER_WIDTH:
+        return [prefix + body]
+    return textwrap.wrap(body, width=RENDER_WIDTH, initial_indent=prefix,
+                         subsequent_indent=following) or [prefix + body]
+
+
+def _subsets_for_render(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The subset descriptors, newest report shape first, older ones rebuilt."""
+    subsets = report.get("subsets")
+    if subsets:
+        return list(subsets)
+    universe = report.get("universe") or {}
+    rebuilt: List[Dict[str, Any]] = []
+    for key in SUBSET_KEYS:
+        table = report.get(SUBSET_REPORT_KEYS[key]) or {}
+        if not table:
+            continue
+        rebuilt.append({
+            "key": key, "label": SUBSET_LABELS[key], "note": SUBSET_NOTES[key],
+            "predictors_key": SUBSET_REPORT_KEYS[key],
+            "decision_relevant": key in DECISION_SUBSETS,
+            "judged": key in DECISION_SUBSETS,
+            "rows": int((table.get("model") or {}).get("n", 0)),
+            "players": int(universe.get("players", 0)),
+            "gameweeks": int((table.get("model") or {}).get("n_gws", 0)),
+        })
+    return rebuilt
 
 
 def _compact_range(gws: Sequence[int]) -> str:
@@ -1315,19 +1708,22 @@ def format_report(report: Dict[str, Any]) -> str:
                _compact_range(universe["gameweeks_excluded_from_comparison"])))
     lines.append("")
 
-    lines.append("--- ALL PLAYERS WITH A FIXTURE " + "-" * 46)
-    lines.append(M.comparison_table(report["predictors"], PREDICTOR_LABELS))
-    if report.get("predictors_likely_starters"):
-        lines.append("")
-        lines.append("--- LIKELY STARTERS ONLY (model p_start >= 0.5) " + "-" * 30)
-        lines.append(M.comparison_table(report["predictors_likely_starters"], PREDICTOR_LABELS))
-    if report.get("predictors_appeared_diagnostic"):
-        lines.append("")
-        lines.append("--- DIAGNOSTIC: PLAYERS WHO ACTUALLY APPEARED " + "-" * 32)
-        lines.append("    (conditions on the outcome — it separates the points model from "
-                     "the minutes model, and is not a decision metric)")
-        lines.append(M.comparison_table(report["predictors_appeared_diagnostic"],
-                                        PREDICTOR_LABELS))
+    # Decision-relevant subsets first, full universe last: the order the verdict
+    # reads them in, so nobody has to work out which table was judged.
+    for index, subset in enumerate(_subsets_for_render(report)):
+        table = report.get(subset["predictors_key"]) or {}
+        if not table:
+            continue
+        if index:
+            lines.append("")
+        lines.append(_rule_heading(
+            "%s: %s" % ("JUDGED" if subset.get("judged") else "DIAGNOSTIC",
+                        subset["label"].upper())))
+        lines.append("    %d rows, %d players, %d gameweek(s)"
+                     % (subset.get("rows", 0), subset.get("players", 0),
+                        subset.get("gameweeks", 0)))
+        lines.extend(_wrap(subset.get("note", ""), "    "))
+        lines.append(M.comparison_table(table, PREDICTOR_LABELS))
     if report.get("predictors_ep_gameweeks"):
         lines.append("")
         lines.append("--- vs FPL'S OWN ep, ON THE %d GAMEWEEK(S) THE ARCHIVE RECORDED IT %s"
@@ -1351,20 +1747,13 @@ def format_report(report: Dict[str, Any]) -> str:
                     row["model_rho_among_appeared"], row["ep_rho_vs_realised_minutes"]))
 
     lines.append("")
-    lines.append("--- VERDICT " + "-" * 65)
-    for line in report["verdict"]["lines"]:
-        lines.append("  " + line)
-    lines.append("")
-    if report["verdict"]["beats_all"]:
-        lines.append("  The model beats every baseline on rank correlation.")
-    else:
-        losers = [k for k, v in report["verdict"]["detail"].items()
-                  if (v.get("spearman_per_gw_mean") or v.get("spearman") or {})
-                  .get("model_better") is False]
-        lines.append("  THE MODEL DOES NOT BEAT EVERY BASELINE. It loses to: %s."
-                     % ", ".join(PREDICTOR_LABELS.get(k, k) for k in losers))
-        lines.append("  Treat its output as no better than the baseline it loses to "
-                     "until that is fixed.")
+    lines.append(_rule_heading("VERDICT"))
+    verdict = report.get("verdict") or {}
+    for line in verdict.get("lines", []):
+        if not line:
+            lines.append("")
+            continue
+        lines.extend(_wrap(line, "  "))
 
     lines.append("")
     lines.append("--- MODEL BY POSITION " + "-" * 55)
@@ -1421,9 +1810,10 @@ def format_report(report: Dict[str, Any]) -> str:
 
     lines.append("")
     lines.append("--- INVARIANTS " + "-" * 62)
-    lines.append("  worst per-fixture expected bonus total: %.4f (limit 6.0), breaches: %d"
+    lines.append("  worst per-fixture expected bonus pot: %.4f (limit %.1f), breaches: %d"
                  % (report["invariants"]["bonus_worst_fixture_total"],
-                    report["invariants"]["bonus_breaches_over_6"]))
+                    bonus_mod.BONUS_POT_SANITY_LIMIT,
+                    report["invariants"]["bonus_breaches_over_limit"]))
 
     lines.append("")
     lines.append("--- WHAT THE REPLAY CANNOT SEE " + "-" * 46)
