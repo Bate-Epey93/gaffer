@@ -593,3 +593,9 @@ button.t-name:hover, button.linkish:hover { color: var(--accent); border-bottom-
   .main { padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
   .toast { bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
 }
+
+/* A published snapshot has no backend to talk to: "Refresh data" would POST
+   /api/refresh and can only ever return 501. Hiding it is honest — the button
+   promises something this build cannot do. The snapshot rebuilds on its own
+   schedule, which the banner explains. */
+body.is-static #btn-refresh { display: none; }

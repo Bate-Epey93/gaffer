@@ -10,3 +10,6 @@ data/autorefresh.lock
 reports/*.json
 .DS_Store
 config.json
+
+# built by `gaffer export`; published by CI, never committed
+site/

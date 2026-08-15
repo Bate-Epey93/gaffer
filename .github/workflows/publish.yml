@@ -1,0 +1,94 @@
+# Build the dashboard on a schedule and publish it to GitHub Pages.
+#
+# The whole point is that the phone never waits: all the expensive work (fetch
+# 587 player summaries, fit six models, solve the squad and chip MILPs) happens
+# here, and what reaches the phone is flat JSON on a CDN.
+#
+# Runtime is roughly 3-4 minutes with the pip cache warm. On a PRIVATE repo that
+# counts against the 2,000 free Actions minutes a month, which is why this runs
+# every 6 hours (~120 runs, ~480 min) rather than hourly. Public repos get
+# unlimited minutes — if you make this repo public you can tighten the schedule.
+
+name: publish
+
+on:
+  schedule:
+    # Every 6 hours. Times are UTC. 05:00 lands after the overnight FPL price
+    # changes (00:00 UK); 17:00 gives a fresh build on Friday evenings, when
+    # deadlines usually sit at 18:30 UK.
+    - cron: "0 5,11,17,23 * * *"
+  # Build on demand from the Actions tab — use this before a deadline once the
+  # team news lands, because a scheduled build cannot know about a press
+  # conference that happened twenty minutes ago.
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # Only rebuild on a push that could change the output.
+    paths:
+      - "gaffer/**"
+      - "requirements.txt"
+      - ".github/workflows/publish.yml"
+
+# Pages needs these; nothing else in the repo does.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let a scheduled run and a manual run publish over each other. The manual
+# one is the urgent one, so let it finish rather than cancelling it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # The FPL API is the one thing here that can fail for reasons outside this
+      # repo. Fail loudly and early rather than publishing a half-built site.
+      - name: Check the scoring rules still match the live API
+        run: python -m gaffer.core.scoring --verify
+
+      - name: Build the site
+        run: python -m gaffer.cli export --out site --horizon 6
+
+      # A published site that silently lost its data is worse than a failed
+      # build, because it still looks fine on the phone.
+      - name: Sanity-check the build
+        run: |
+          set -euo pipefail
+          test -f site/index.html
+          test -f site/data/manifest.json
+          test -f site/data/optimize.json
+          test -f site/data/players.json
+          players=$(python -c "import json;print(json.load(open('site/data/manifest.json'))['players_exported'])")
+          echo "player breakdowns: $players"
+          test "$players" -gt 400
+          du -sh site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

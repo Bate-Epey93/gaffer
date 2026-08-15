@@ -1037,6 +1037,44 @@ def cmd_serve(args: argparse.Namespace, ctx: Context) -> int:
     return EXIT_OK
 
 
+def cmd_export(args: argparse.Namespace, ctx: Context) -> int:
+    """Freeze the dashboard to disk for a static host."""
+    from gaffer.ops.export import ExportError, export_site, format_summary
+
+    out_dir = args.out if os.path.isabs(args.out) else os.path.join(PROJECT_ROOT, args.out)
+    print(heading("gaffer export"))
+    sys.stdout.flush()
+    try:
+        with ctx.progress.step("exporting the dashboard to %s" % out_dir):
+            summary = export_site(
+                out_dir,
+                config=ctx.config,
+                horizon=int(args.horizon),
+                include_players=not args.no_players,
+                progress=ctx.progress.say,
+            )
+    except ExportError as exc:
+        print("\nexport failed: %s" % exc)
+        return EXIT_FAIL
+
+    print("\n" + format_summary(summary))
+    print(render_table(
+        ["item", "value"],
+        [
+            ["output", summary["out_dir"]],
+            ["gameweeks", "GW%d-%d" % (summary["gws"][0], summary["gws"][-1])],
+            ["files", summary["files"]],
+            ["JSON size", "%.1f MB" % (summary["bytes"] / (1024.0 * 1024.0))],
+            ["player breakdowns", summary["players"]],
+            ["generated at", summary["generated_at"]],
+            ["took", "%.1fs" % summary["seconds"]],
+        ],
+        align="lr",
+    ))
+    print("\nServe it locally to check it:  python -m http.server -d %s 8000" % summary["out_dir"])
+    return EXIT_OK
+
+
 def cmd_verify(args: argparse.Namespace, ctx: Context) -> int:
     checks: List[Tuple[str, bool, str]] = []
 
@@ -1282,6 +1320,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level", default="info",
                    choices=["critical", "error", "warning", "info", "debug"])
     p.set_defaults(func=cmd_serve)
+
+    p = add("export", "freeze the dashboard into static files",
+            "Compute everything once and write the whole dashboard to a directory "
+            "of flat JSON plus the web assets, ready to publish to any static host. "
+            "The result opens instantly and costs nothing to serve; what it cannot "
+            "do is re-optimise against constraints you change on the phone, because "
+            "that needs a solver.")
+    p.add_argument("--out", default="site", help="output directory (default: site)")
+    p.add_argument("--horizon", type=int, default=6,
+                   help="gameweeks to project (default 6)")
+    p.add_argument("--no-players", action="store_true",
+                   help="skip the 587 per-player breakdown files")
+    p.set_defaults(func=cmd_export)
 
     p = add("verify", "check the scoring constants and the data",
             "Re-check every scoring constant against the live API, then audit the "

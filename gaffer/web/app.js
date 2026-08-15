@@ -133,8 +133,131 @@
     if (store.mode === 'live') announceStale();
   }
 
+  /* ---------------------------------------------------------- static mode --
+     A published snapshot has no backend: `gaffer export` freezes every route
+     to data/*.json and the site is served from a CDN. Rather than teach every
+     caller about two worlds, the switch lives here — `request()` keeps its
+     signature and rewrites the path to a file when a snapshot is detected.
+
+     Detection is a probe for data/manifest.json at boot, not a build-time flag,
+     so the very same index.html works served by the live API and served from a
+     static host. The one thing that genuinely cannot work is re-solving against
+     constraints changed on the phone, so those POSTs fail with a plain message
+     rather than a network error nobody can act on. */
+  var STATIC = null;          // null = not yet probed, else the manifest or false
+
+  function staticFile(path) {
+    var clean = path.split('#')[0];
+    var bits = clean.split('?');
+    var route = bits[0];
+    var query = bits[1] || '';
+
+    if (route === '/state') return 'data/state.json';
+    if (route === '/fixtures') return 'data/fixtures.json';
+    if (route === '/players') return 'data/players.json';
+    if (route === '/projections') return 'data/projections.json';
+    if (route === '/chips') return 'data/chips.json';
+    if (route === '/optimize') return 'data/optimize.json';
+    if (route === '/captain') {
+      var gw = /gw=(\d+)/.exec(query);
+      return 'data/captain-gw' + (gw ? gw[1] : (STATIC && STATIC.gw) || 1) + '.json';
+    }
+    var player = /^\/player\/(\d+)$/.exec(route);
+    if (player) return 'data/player/' + player[1] + '.json';
+    return null;
+  }
+
+  /* The per-player file carries the shared blocks once and the two fields that
+     actually vary — `player` and `explanation` — keyed by gameweek, so the
+     drawer gets the same shape the live API would have returned. */
+  function applyPlayerOverrides(doc, path) {
+    if (!doc || !doc.by_gw_overrides) return doc;
+    var gw = /gw=(\d+)/.exec(path);
+    var key = gw ? gw[1] : String((STATIC && STATIC.gw) || 1);
+    var override = doc.by_gw_overrides[key];
+    if (override) {
+      if (override.player) doc.player = override.player;
+      if (override.explanation) doc.explanation = override.explanation;
+    }
+    return doc;
+  }
+
+  /* Does this optimise ask the same question the snapshot already answered?
+     Compared field by field against the manifest's record of the frozen
+     request, so adding a constraint the export never saw is caught rather
+     than silently answered with the default. */
+  function sameOptimizeRequest(body) {
+    var frozen = (STATIC && STATIC.optimize_request) || {};
+    var asked = body || {};
+    var keys = {};
+    Object.keys(frozen).forEach(function (k) { keys[k] = true; });
+    Object.keys(asked).forEach(function (k) { keys[k] = true; });
+    return Object.keys(keys).every(function (k) {
+      var a = frozen[k], b = asked[k];
+      if (a === undefined || a === null) return b === undefined || b === null;
+      return String(a) === String(b);
+    });
+  }
+
+  function staticRequest(path, opts) {
+    var method = (opts && opts.method) || 'GET';
+    var file = staticFile(path);
+    if (method !== 'GET' && path.indexOf('/optimize') === 0) {
+      // One solve is frozen in the snapshot: the one the export ran. Serve it
+      // when this is the same question, and say so plainly when it is not,
+      // rather than quietly handing back an answer to a different query.
+      if (!sameOptimizeRequest(opts && opts.body)) {
+        var e = new Error(
+          'This is a published snapshot, so it cannot re-run the optimiser. ' +
+          'Run gaffer locally to solve with your own constraints.');
+        e.status = 501; e.path = path;
+        return Promise.reject(e);
+      }
+      file = 'data/optimize.json';
+    } else if (method !== 'GET') {
+      var e2 = new Error(
+        'This is a published snapshot and cannot ' +
+        (path.indexOf('/refresh') === 0 ? 'refresh the data' : 'do that') +
+        '. It rebuilds itself on a schedule.');
+      e2.status = 501; e2.path = path;
+      return Promise.reject(e2);
+    }
+    if (!file) {
+      var e3 = new Error('not available in a published snapshot');
+      e3.status = 501; e3.path = path;
+      return Promise.reject(e3);
+    }
+    return fetch(file, { headers: { 'Accept': 'application/json' } })
+      .then(function (res) {
+        if (!res.ok) {
+          var err = new Error(res.status === 404
+            ? 'this snapshot does not include ' + file
+            : res.status + ' ' + res.statusText);
+          err.status = res.status; err.path = path;
+          throw err;
+        }
+        return res.json();
+      })
+      .then(function (body) { return applyPlayerOverrides(body, path); });
+  }
+
+  /* Probe once, before anything else runs. Resolves to the manifest or false. */
+  function detectStatic() {
+    if (STATIC !== null) return Promise.resolve(STATIC);
+    return fetch('data/manifest.json', { headers: { 'Accept': 'application/json' } })
+      .then(function (res) { return res.ok ? res.json() : false; })
+      .catch(function () { return false; })
+      .then(function (manifest) {
+        STATIC = (manifest && manifest.static) ? manifest : false;
+        return STATIC;
+      });
+  }
+  G.detectStatic = detectStatic;
+  G.isStatic = function () { return !!STATIC; };
+
   function request(path, opts) {
     opts = opts || {};
+    if (STATIC) return staticRequest(path, opts);
     var budget = opts.timeout || timeoutFor(path);
     var ctrl = ('AbortController' in window) ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, budget) : null;
@@ -598,6 +721,36 @@
     );
   }
 
+  /* "3 hours ago" from an ISO stamp. Deliberately coarse: the useful question
+     before a deadline is "was this built before or after the team news", and a
+     rounded age answers it without implying false precision. */
+  function snapshotAge(iso) {
+    var then = Date.parse(iso || '');
+    if (!then) return 'age unknown';
+    var mins = Math.max(0, Math.round((Date.now() - then) / 60000));
+    if (mins < 2) return 'just now';
+    if (mins < 60) return mins + ' min ago';
+    var hours = Math.round(mins / 60);
+    if (hours < 24) return hours + (hours === 1 ? ' hour ago' : ' hours ago');
+    var days = Math.round(hours / 24);
+    return days + (days === 1 ? ' day ago' : ' days ago');
+  }
+
+  /* Say it once, plainly: these numbers were true when the snapshot was built.
+     Anything that moved since — an injury, a price change, a press conference —
+     is not in here. */
+  function announceSnapshot() {
+    if (!STATIC) return;
+    var age = snapshotAge(STATIC.generated_at);
+    var stale = Date.parse(STATIC.generated_at || '')
+      && (Date.now() - Date.parse(STATIC.generated_at)) > 12 * 3600 * 1000;
+    banner(
+      '<b>Published snapshot, built ' + age + '.</b> It rebuilds on a schedule, ' +
+      'so team news since then is not reflected. Re-optimising with your own ' +
+      'constraints needs gaffer running locally.',
+      stale ? 'err' : 'info');
+  }
+
   function boot() {
     store.mode = 'loading';
     store.stale = null;
@@ -606,11 +759,24 @@
     setSource('busy', 'connecting…');
     clearBanner();
     renderView(store.view, true);
+    // Decide which world we are in before the first request goes out.
+    return detectStatic().then(bootAfterProbe);
+  }
+
+  function bootAfterProbe() {
+    if (STATIC) document.body.classList.add('is-static');
     return loadLive().then(function () {
       store.mode = 'live';
-      setSource('live', 'LIVE · ' + store.players.length + ' players');
+      if (STATIC) {
+        // Calling a snapshot "LIVE" would be a lie, and the age is the one
+        // thing that decides whether you can trust it before a deadline.
+        setSource('live', 'SNAPSHOT · ' + snapshotAge(STATIC.generated_at));
+      } else {
+        setSource('live', 'LIVE · ' + store.players.length + ' players');
+      }
       clearBanner();
-      if (store.state && store.state.fitted === false) {
+      if (STATIC) announceSnapshot();
+      if (!STATIC && store.state && store.state.fitted === false) {
         banner('<b>The backend is up but reports the model is not fitted.</b> ' +
                'Run <code>python -m gaffer.cli project --gws ' + store.gw + '-' +
                (store.gw + store.horizon - 1) + '</code>, then reload.', 'err',
