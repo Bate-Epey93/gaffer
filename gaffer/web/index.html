@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>gaffer — FPL 2026/27</title>
+<!-- empty data URI: suppresses the favicon request without referencing anything external -->
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar" id="topbar">
+  <div class="brand">
+    <span class="brand-mark">gaffer</span>
+    <span class="brand-sub" id="brand-season">2026/27</span>
+  </div>
+
+  <div class="clocks">
+    <div class="clock" id="clock-deadline">
+      <span class="clock-label">next deadline</span>
+      <span class="clock-value" id="deadline-value">—</span>
+      <span class="clock-sub" id="deadline-sub"></span>
+    </div>
+    <div class="clock" id="clock-chips">
+      <span class="clock-label">1st-half chips expire</span>
+      <span class="clock-value" id="chipclock-value">—</span>
+      <span class="clock-sub" id="chipclock-sub"></span>
+    </div>
+  </div>
+
+  <div class="topbar-right">
+    <button type="button" class="pill pill-source" id="source-pill" aria-live="polite">
+      <span class="dot"></span><span id="source-text">connecting…</span>
+    </button>
+    <button type="button" class="btn btn-ghost" id="btn-reload" title="Reload data from the backend">Reload</button>
+    <button type="button" class="btn btn-accent" id="btn-refresh" title="Force the backend to re-fetch source data (POST /api/refresh)">Refresh data</button>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs" role="tablist" aria-label="Views">
+  <button type="button" class="tab" role="tab" data-view="squad"   id="tab-squad"><b>1</b> Squad</button>
+  <button type="button" class="tab" role="tab" data-view="players" id="tab-players"><b>2</b> Players</button>
+  <button type="button" class="tab" role="tab" data-view="planner" id="tab-planner"><b>3</b> Planner</button>
+  <button type="button" class="tab" role="tab" data-view="captain" id="tab-captain"><b>4</b> Captain</button>
+  <button type="button" class="tab" role="tab" data-view="chips"   id="tab-chips"><b>5</b> Chips</button>
+</nav>
+
+<div id="banner" class="banner" hidden></div>
+
+<main id="main" class="main">
+  <section class="view" id="view-squad"   role="tabpanel" aria-labelledby="tab-squad"   hidden></section>
+  <section class="view" id="view-players" role="tabpanel" aria-labelledby="tab-players" hidden></section>
+  <section class="view" id="view-planner" role="tabpanel" aria-labelledby="tab-planner" hidden></section>
+  <section class="view" id="view-captain" role="tabpanel" aria-labelledby="tab-captain" hidden></section>
+  <section class="view" id="view-chips"   role="tabpanel" aria-labelledby="tab-chips"   hidden></section>
+</main>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" aria-label="Player breakdown" aria-hidden="true" hidden>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<script src="sample.js"></script>
+<script src="ui.js"></script>
+<script src="views.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

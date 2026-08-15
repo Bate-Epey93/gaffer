@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+data/cache/*.json
+data/cache/*.parquet
+data/raw/
+reports/*.json
+.DS_Store
+config.json
