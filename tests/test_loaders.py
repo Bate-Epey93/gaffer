@@ -6,6 +6,7 @@ network once the cache is warm.
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -77,7 +78,11 @@ def test_fixture_helpers_agree_with_the_raw_fields(game_state):
 
 
 def test_the_player_pool_is_the_2026_27_one(game_state):
-    assert len(game_state.players) == 587
+    # A range, not an exact count. The pool grows all season as clubs register
+    # signings — it went 587 -> 590 within a day of this test being written —
+    # and pinning the number turns an ordinary transfer into a red build.
+    # What actually matters is that it is a full top-flight pool, not a stub.
+    assert 500 <= len(game_state.players) <= 800, len(game_state.players)
     positions = Counter(p.position for p in game_state.players.values())
     assert set(positions) == set(scoring.POSITIONS)
     # There must be enough of every position to build a legal 15 many times over.
@@ -333,7 +338,7 @@ def test_promoted_club_players_have_no_prior_premier_league_season(game_state):
 def test_summary_reports_the_headline_numbers(game_state):
     summary = game_state.summary()
     assert "20 teams" in summary
-    assert "587 players" in summary
+    assert re.search(r"\b[5-7]\d\d players\b", summary), summary
     assert "380 fixtures" in summary
     assert "current_gw=1" in summary
 
