@@ -406,9 +406,10 @@ Before a deadline, once the team news has landed, trigger a fresh build by hand:
 **Actions → publish → Run workflow**. A scheduled build cannot know about a press
 conference that happened twenty minutes ago.
 
-The schedule is every 6 hours because a **private** repo gets 2,000 free Actions
-minutes a month and each run costs 3-4; that's ~480 minutes. Public repos get
-unlimited minutes, so you can run it hourly if you make the repo public.
+The schedule is **hourly**, which is affordable because the repo is public — public
+repos get unlimited Actions minutes. If you ever switch it to private, drop back to
+every 6 hours (`0 5,11,17,23 * * *`): a private repo gets 2,000 free minutes a month
+and hourly would exhaust that in about a week.
 
 **Your published site is readable by anyone with the URL** — GitHub Pages on a free
 account is public even when the repo is private. The data is public FPL data, but

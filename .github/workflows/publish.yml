@@ -4,19 +4,22 @@
 # 587 player summaries, fit six models, solve the squad and chip MILPs) happens
 # here, and what reaches the phone is flat JSON on a CDN.
 #
-# Runtime is roughly 3-4 minutes with the pip cache warm. On a PRIVATE repo that
-# counts against the 2,000 free Actions minutes a month, which is why this runs
-# every 6 hours (~120 runs, ~480 min) rather than hourly. Public repos get
-# unlimited minutes — if you make this repo public you can tighten the schedule.
+# Runtime is roughly 3-4 minutes with the pip cache warm.
+#
+# Hourly is affordable only because this repo is PUBLIC: public repos get
+# unlimited Actions minutes. A private repo gets 2,000 free minutes a month, and
+# hourly (~720 runs x 3-4 min) would blow through that in about a week — so if
+# you ever switch this repo to private, drop back to something like
+# "0 5,11,17,23 * * *" (every 6 hours, ~480 min/month).
 
 name: publish
 
 on:
   schedule:
-    # Every 6 hours. Times are UTC. 05:00 lands after the overnight FPL price
-    # changes (00:00 UK); 17:00 gives a fresh build on Friday evenings, when
-    # deadlines usually sit at 18:30 UK.
-    - cron: "0 5,11,17,23 * * *"
+    # Every hour, on the hour, UTC. Hourly matters most around price changes
+    # (00:00 UK) and on the run-up to a deadline, when injury news and flags
+    # move through the FPL API during the day.
+    - cron: "0 * * * *"
   # Build on demand from the Actions tab — use this before a deadline once the
   # team news lands, because a scheduled build cannot know about a press
   # conference that happened twenty minutes ago.
