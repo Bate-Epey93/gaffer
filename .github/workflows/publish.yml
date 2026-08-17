@@ -94,6 +94,13 @@ jobs:
         # derived goal rates ship.
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          # The manager's team id. CI is not a browser, so unlike the published
+          # site it is allowed to read the FPL entry endpoints; the picks are
+          # baked into the build and the dashboard imports them with no backend.
+          # Set as a repository *variable* (Settings > Secrets and variables >
+          # Actions > Variables), not a secret — it is not sensitive, and a
+          # secret would be masked in the logs where seeing it is useful.
+          FPL_ENTRY_ID: ${{ vars.FPL_ENTRY_ID }}
         run: python -m gaffer.cli export --out site --horizon 6
 
       # A published site that silently lost its data is worse than a failed

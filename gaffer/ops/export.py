@@ -251,6 +251,44 @@ def export_site(
     written["optimize.json"] = _write_json(
         os.path.join(data_dir, "optimize.json"), response.json())
 
+    # --- the manager's own squad -------------------------------------------
+    # A browser on the published site cannot fetch this: the FPL API sends no
+    # CORS headers, so it is not allowed to read entry data cross-origin. CI is
+    # not a browser, so it can — and baking the picks in here is what makes
+    # "import my team" work on a phone with no backend at all.
+    #
+    # Note this is not only a CORS problem. Before a gameweek deadline FPL
+    # publishes nobody's picks; the endpoint 404s for everyone including the
+    # manager. So a miss here is expected pre-season and is recorded as a
+    # reason rather than an error.
+    entry_id = getattr(config or Config(), "entry_id", None)
+    entry_status = "no FPL_ENTRY_ID configured"
+    if entry_id:
+        say("the manager's squad (entry %s)" % entry_id)
+        response = client.get("/api/squad?entry_id=%d" % int(entry_id))
+        if response.status_code == 200:
+            payload = response.json()
+            payload["exported_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            written["entry.json"] = _write_json(os.path.join(data_dir, "entry.json"), payload)
+            entry_status = "imported"
+        else:
+            detail = ""
+            try:
+                detail = (response.json() or {}).get("detail") or ""
+            except ValueError:
+                detail = response.text[:160]
+            entry_status = "unavailable (HTTP %d): %s" % (response.status_code, detail)
+            # Write the reason, so the dashboard can explain itself instead of
+            # showing a bare 404 for a file it expected to exist.
+            written["entry.json"] = _write_json(os.path.join(data_dir, "entry.json"), {
+                "entry_id": int(entry_id),
+                "unavailable": True,
+                "reason": detail or "picks are not published yet",
+                "status_code": response.status_code,
+                "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            })
+        say("  %s" % entry_status)
+
     player_count = 0
     if include_players:
         # Only `player` and `explanation` vary by gameweek; `by_gw`, `fixtures`
@@ -302,6 +340,8 @@ def export_site(
         # The exact POST body optimize.json answers; the front end compares
         # against it rather than guessing which solves are covered.
         "optimize_request": optimize_request,
+        "entry_id": int(entry_id) if entry_id else None,
+        "entry_status": entry_status,
         "players_exported": player_count,
         "bytes": sum(written.values()),
         "routes": sorted(written.keys()),

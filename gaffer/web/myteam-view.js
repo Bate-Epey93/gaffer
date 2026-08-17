@@ -54,6 +54,10 @@
       status.textContent = 'Loading team ' + id + '…';
 
       G.request('/squad?entry_id=' + id).then(function (res) {
+        // A snapshot records WHY the import failed rather than 404ing, because
+        // the usual reason is not an error at all — see below.
+        if (res && res.unavailable) throw new Error(res.reason || 'picks are not published yet');
+
         var picks = (res.squad && res.squad.picks) || res.picks || res.squad || [];
         var ids = picks.map(function (p) {
           return typeof p === 'number' ? p : (p.element || p.id);
@@ -62,15 +66,37 @@
         M().setPicks(ids, 'entry');
         U.toast('Loaded your team from FPL.');
         rerender();
-      }, function (err) {
-        // The published site cannot do this, and the reason is worth stating
-        // precisely rather than showing a bare network error.
-        status.innerHTML = G.isStatic()
-          ? '<b>The published site cannot fetch your team.</b> The FPL API sends no ' +
-            'CORS headers, so a browser on another domain is not allowed to read it. ' +
-            'Either build your squad below by hand, or run gaffer locally ' +
-            '(<code>python -m gaffer.cli serve</code>) where it can import in one click.'
-          : 'Could not load that team: ' + esc((err && err.message) || 'unknown error');
+      /* .catch, NOT the two-argument .then(onOk, onErr). An exception thrown
+         inside onOk is not routed to a sibling onErr — it becomes an unhandled
+         rejection, which is exactly what happened here: the "not published yet"
+         throw above vanished and the panel sat on "Loading…" forever. */
+      }).catch(function (err) {
+        var msg = esc((err && err.message) || 'unknown error');
+        var baked = (G.staticManifest && G.staticManifest().entry_id) || null;
+
+        /* Two different failures used to be reported as one. Before a deadline
+           FPL publishes NOBODY's picks — the endpoint 404s for the manager too,
+           so this is not about CORS and not about this site; running locally
+           would fail identically. Saying "run it locally" in that case sends
+           someone off to do work that cannot possibly succeed. */
+        if (/not published|no picks|404|not found/i.test(msg)) {
+          status.innerHTML =
+            '<b>Your squad is not public yet.</b> FPL only publishes a manager\'s ' +
+            'picks after the gameweek deadline — before then nobody can read them, ' +
+            'including this app running on your own machine. It will import ' +
+            'automatically once the deadline passes. Until then, build your 15 below.';
+          return;
+        }
+        if (G.isStatic() && Number(id) !== Number(baked)) {
+          status.innerHTML =
+            '<b>This snapshot only carries team ' + (baked ? esc(String(baked)) : 'none') +
+            '.</b> The published site cannot fetch a different team on demand: the FPL ' +
+            'API sends no CORS headers, so a browser is not allowed to read it from ' +
+            'another domain. The build imports one configured team; to use this id, ' +
+            'set FPL_ENTRY_ID in the repository and let the next build run.';
+          return;
+        }
+        status.innerHTML = 'Could not load that team: ' + msg;
       });
     }
 

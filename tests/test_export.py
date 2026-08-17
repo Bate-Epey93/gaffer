@@ -223,3 +223,58 @@ def test_service_worker_precaches_the_stamped_urls(site):
     assert '"__GAFFER_SHELL__"' not in sw
     assert "const SHELL_INJECTED = [" in sw
     assert "app.js?v=" in sw
+
+
+# --- the manager's own squad ------------------------------------------------
+
+def test_entry_export_is_skipped_without_a_configured_id(site):
+    """No FPL_ENTRY_ID means no entry.json and no pretending otherwise."""
+    manifest = read(site, "data", "manifest.json")
+    assert manifest["entry_id"] is None
+    assert "no FPL_ENTRY_ID" in manifest["entry_status"]
+
+
+def test_entry_export_records_why_it_failed(tmp_path, monkeypatch):
+    """Before a deadline FPL publishes nobody's picks, so a miss is expected.
+
+    The build must write the REASON rather than skipping the file, otherwise the
+    dashboard 404s on a file it was told to expect and reports a network error
+    for something that is not an error at all.
+    """
+    from gaffer.core.config import Config
+    from gaffer.ops.export import export_site
+
+    cfg = Config()
+    cfg.entry_id = 5161860
+    summary = export_site(str(tmp_path), config=cfg, horizon=1, include_players=False)
+    assert summary  # the build must not fail because an import did
+
+    with open(os.path.join(str(tmp_path), "data", "manifest.json"), encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert manifest["entry_id"] == 5161860
+
+    path = os.path.join(str(tmp_path), "data", "entry.json")
+    assert os.path.exists(path), "entry.json must be written even when unavailable"
+    with open(path, encoding="utf-8") as fh:
+        entry = json.load(fh)
+    if entry.get("unavailable"):
+        assert entry["reason"], "an unavailable import must say why"
+        assert entry["status_code"]
+    else:
+        picks = (entry.get("squad") or {}).get("picks") or entry.get("picks") or []
+        assert len(picks) == 15
+
+
+def test_the_import_uses_catch_not_a_two_argument_then():
+    """`.then(onOk, onErr)` does not route exceptions thrown inside onOk.
+
+    The "your squad is not public yet" path throws from the success handler, so
+    with the two-argument form it became an unhandled rejection and the panel
+    sat on "Loading…" forever. This pins the shape that actually works.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "gaffer", "web", "myteam-view.js"), encoding="utf-8") as fh:
+        source = fh.read()
+    start = source.index("G.request('/squad?entry_id=")
+    block = source[start:start + 3000]
+    assert ".catch(function (err)" in block, "the import must handle errors with .catch"

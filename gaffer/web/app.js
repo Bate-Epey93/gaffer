@@ -158,6 +158,9 @@
     if (route === '/projections') return 'data/projections.json';
     if (route === '/chips') return 'data/chips.json';
     if (route === '/optimize') return 'data/optimize.json';
+    // The manager's own squad, fetched by CI (which is not a browser and so is
+    // not bound by CORS) and baked into the build.
+    if (route === '/squad') return 'data/entry.json';
     if (route === '/captain') {
       var gw = /gw=(\d+)/.exec(query);
       return 'data/captain-gw' + (gw ? gw[1] : (STATIC && STATIC.gw) || 1) + '.json';
@@ -254,6 +257,9 @@
   }
   G.detectStatic = detectStatic;
   G.isStatic = function () { return !!STATIC; };
+  // The manifest itself, for views that need to explain what this build carries
+  // (which team was imported, when it was generated).
+  G.staticManifest = function () { return STATIC || {}; };
 
   function request(path, opts) {
     opts = opts || {};
