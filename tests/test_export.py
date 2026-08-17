@@ -131,3 +131,49 @@ def test_summary_reports_what_it_wrote(site):
     assert summary["players"] > 400
     assert summary["bytes"] > 100_000
     assert summary["seconds"] > 0
+
+
+# --- installable from a subdirectory ---------------------------------------
+# GitHub Pages serves a project site from /<repo>/, not the domain root. Every
+# absolute path in the PWA shell is a 404 there, and the failure is silent:
+# the page still loads, but the app is not installable and has no offline mode.
+
+def test_manifest_paths_are_relative_not_root_absolute(site):
+    """start_url "/" installed from Pages launches the wrong site entirely."""
+    with open(os.path.join(site["dir"], "manifest.webmanifest"), encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert manifest["start_url"] == "./"
+    assert manifest["scope"] == "./"
+    assert manifest["id"] == "./"
+    for icon in manifest["icons"]:
+        assert not icon["src"].startswith("/"), icon["src"]
+
+
+def test_service_worker_placeholders_are_substituted(site):
+    """An unsubstituted BUILD pins the cache name, so one deploy's JavaScript
+    is served cache-first forever."""
+    with open(os.path.join(site["dir"], "sw.js"), encoding="utf-8") as fh:
+        source = fh.read()
+    assert '"__GAFFER_BUILD__"' not in source
+    assert "const BUILD = " in source
+
+
+def test_service_worker_derives_its_own_base(site):
+    """The worker must not assume it lives at the origin root."""
+    with open(os.path.join(site["dir"], "sw.js"), encoding="utf-8") as fh:
+        source = fh.read()
+    assert "self.location.pathname.replace" in source
+    # The precache list has to be built from that base, not from "/". Match
+    # actual array entries, not prose: the comments above SHELL quote the old
+    # root-absolute paths precisely to explain why they were wrong.
+    entries = [line.strip() for line in source.splitlines()
+               if line.strip().startswith('"/') and line.strip().endswith('",')]
+    assert not entries, "root-absolute precache entries: %s" % entries
+    assert 'BASE + "styles.css"' in source
+
+
+def test_app_registers_the_worker_relatively(site):
+    with open(os.path.join(site["dir"], "app.js"), encoding="utf-8") as fh:
+        source = fh.read()
+    assert "register('sw.js'" in source
+    assert "register('/sw.js'" not in source

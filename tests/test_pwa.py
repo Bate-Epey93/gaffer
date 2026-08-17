@@ -254,9 +254,18 @@ def test_the_worker_is_network_first_for_the_api():
     assert 'if (request.method !== "GET") return;' in src
 
 
-def test_the_app_registers_the_worker_at_the_root_scope():
+def test_the_app_registers_the_worker_relative_to_the_document():
+    """Relative, not '/sw.js'.
+
+    This used to assert the root-absolute form, which is right when the API
+    server hosts the dashboard at "/" and silently wrong on GitHub Pages, where
+    a project site lives at /<repo>/. There '/sw.js' is a 404: no worker
+    registers, the app is not installable, and nothing reports a failure.
+    A relative specifier resolves against the document in both cases.
+    """
     app = _read("app.js")
-    assert "navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })" in app
+    assert "navigator.serviceWorker.register('sw.js', { scope: './', updateViaCache: 'none' })" in app
+    assert "register('/sw.js'" not in app
     assert "'serviceWorker' in navigator" in app
 
 

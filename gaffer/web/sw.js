@@ -22,24 +22,31 @@
  */
 
 const CACHE_VERSION = "v1";                  // bump by hand to invalidate everything
-const BUILD = "__GAFFER_BUILD__";            // replaced at serve time with a shell hash
+const BUILD = "__GAFFER_BUILD__";            // replaced at serve/export time with a shell hash
+
+/* Where this worker lives, with the trailing "sw.js" removed: "/" when the API
+   server hosts it, "/gaffer/" when GitHub Pages serves the exported site out of
+   a project subdirectory. Everything below is built from BASE rather than a
+   hardcoded "/", because a shell precached at "/styles.css" is a 404 on Pages
+   and the worker then installs with an empty cache and no offline mode at all. */
+const BASE = self.location.pathname.replace(/sw\.js$/, "");
 
 /* Replaced at serve time with the mtime-stamped shell URLs. The literal below
-   is the fallback for anyone opening this file straight off disk, and doubles
-   as the documentation of what the shell actually is. */
+   is the fallback for the exported site and for anyone opening this file
+   straight off disk, and doubles as the documentation of what the shell is. */
 const SHELL_INJECTED = "__GAFFER_SHELL__";
 const SHELL = Array.isArray(SHELL_INJECTED) ? SHELL_INJECTED : [
-  "/",
-  "/styles.css",
-  "/sample.js",
-  "/ui.js",
-  "/views.js",
-  "/app.js",
-  "/manifest.webmanifest",
-  "/icons/icon-180.png",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png",
-  "/icons/icon-512-maskable.png"
+  BASE,
+  BASE + "styles.css",
+  BASE + "sample.js",
+  BASE + "ui.js",
+  BASE + "views.js",
+  BASE + "app.js",
+  BASE + "manifest.webmanifest",
+  BASE + "icons/icon-180.png",
+  BASE + "icons/icon-192.png",
+  BASE + "icons/icon-512.png",
+  BASE + "icons/icon-512-maskable.png"
 ];
 
 const SHELL_CACHE = "gaffer-shell-" + CACHE_VERSION + "-" + BUILD;
@@ -143,18 +150,18 @@ self.addEventListener("fetch", function (event) {
     event.respondWith(
       fetch(request).then(function (response) {
         if (response && response.ok) {
-          event.waitUntil(putStamped(SHELL_CACHE, new Request("/"), response));
+          event.waitUntil(putStamped(SHELL_CACHE, new Request(BASE), response));
         }
         return response;
       }).catch(function () {
         return caches.open(SHELL_CACHE).then(function (cache) {
-          return cache.match("/", { ignoreSearch: true, ignoreVary: true });
+          return cache.match(BASE, { ignoreSearch: true, ignoreVary: true });
         }).then(function (hit) {
           return hit || new Response(
             "<!doctype html><meta charset=utf-8><title>gaffer — offline</title>" +
             "<body style=\"background:#07080a;color:#e9edf3;font:14px -apple-system,sans-serif;padding:2rem\">" +
-            "<h1 style=\"color:#3ee0b8\">gaffer is offline</h1><p>The Mac is not reachable and " +
-            "nothing is cached yet. Open this once while connected and it will work offline after that.</p>",
+            "<h1 style=\"color:#3ee0b8\">gaffer is offline</h1><p>Nothing is cached yet. " +
+            "Open this once while connected and it will work offline after that.</p>",
             { status: 503, headers: { "Content-Type": "text/html; charset=utf-8" } });
         });
       })
@@ -164,6 +171,15 @@ self.addEventListener("fetch", function (event) {
 
   if (url.pathname.indexOf("/api/") === 0) {
     if (isNeverCached(url.pathname)) return;                // straight to the network, no fallback
+    event.respondWith(networkFirst(event, API_CACHE));
+    return;
+  }
+
+  /* The exported site's data/*.json ARE the API — same projections, same
+     deadline attached, same rule. Cache-first would silently serve a snapshot
+     from three deploys ago while the phone is perfectly online, which is the
+     one failure this worker exists to prevent. */
+  if (url.pathname.indexOf(BASE + "data/") === 0) {
     event.respondWith(networkFirst(event, API_CACHE));
     return;
   }

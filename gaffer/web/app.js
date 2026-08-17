@@ -764,7 +764,16 @@
   }
 
   function bootAfterProbe() {
-    if (STATIC) document.body.classList.add('is-static');
+    if (STATIC) {
+      document.body.classList.add('is-static');
+      // Adopt the snapshot's horizon. The frozen files were computed for one
+      // horizon, and the store's compiled-in default need not match it — when
+      // they diverge every request is for a window the snapshot does not hold,
+      // and the squad view fails with a 501 that looks like a bug rather than
+      // a mismatch. The manifest is the authority here.
+      if (STATIC.horizon) store.horizon = Number(STATIC.horizon);
+      if (STATIC.gw) store.gw = Number(STATIC.gw);
+    }
     return loadLive().then(function () {
       store.mode = 'live';
       if (STATIC) {
@@ -1072,7 +1081,10 @@
       location.reload();
     });
 
-    navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })
+    // Relative, not '/sw.js': the exported site is served from a project
+    // subdirectory on Pages (/gaffer/), where an absolute path is a 404 and the
+    // app silently loses offline support and installability.
+    navigator.serviceWorker.register('sw.js', { scope: './', updateViaCache: 'none' })
       .catch(function (err) {
         // Never fatal: without a worker the dashboard is exactly what it was
         // before, an online-only page.

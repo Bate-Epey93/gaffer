@@ -24,6 +24,7 @@ captaincy, chips, per-player breakdowns — is fully present.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -62,13 +63,63 @@ def _write_json(path: str, payload: Any) -> int:
     return len(body.encode("utf-8"))
 
 
+def _shell_build_hash(out_dir: str) -> str:
+    """A short digest of the shell, used to name the service worker's cache.
+
+    The live server stamps every shell URL with its mtime, so a cached hit is
+    provably the right bytes. The exported site has no such stamping, which
+    makes the shell cache-first *forever* unless the cache name itself changes
+    when the code does. Hashing the shell gives exactly that.
+    """
+    digest = hashlib.sha256()
+    for name in sorted(ASSET_FILES):
+        path = os.path.join(WEB_DIR, name)
+        if os.path.exists(path):
+            with open(path, "rb") as handle:
+                digest.update(handle.read())
+    return digest.hexdigest()[:12]
+
+
+def _rewrite_manifest(path: str) -> None:
+    """Make the web app manifest work from a subdirectory.
+
+    GitHub Pages serves a project site from /<repo>/, but the checked-in
+    manifest declares start_url, scope and id as "/". Installed from Pages that
+    launches the *domain root*, which is a different site entirely — the icon
+    lands on the home screen and opens the wrong page. Relative values resolve
+    against the manifest's own URL, so they are correct at any depth.
+    """
+    with open(path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    manifest["id"] = "./"
+    manifest["start_url"] = "./"
+    manifest["scope"] = "./"
+    for icon in manifest.get("icons", []):
+        icon["src"] = icon["src"].lstrip("/")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+
+
 def _copy_assets(out_dir: str) -> List[str]:
     copied = []
+    build = _shell_build_hash(out_dir)
     for name in ASSET_FILES:
         src = os.path.join(WEB_DIR, name)
         if not os.path.exists(src):
             raise ExportError("missing web asset: %s" % src)
-        shutil.copy2(src, os.path.join(out_dir, name))
+        dst = os.path.join(out_dir, name)
+        shutil.copy2(src, dst)
+        if name == "sw.js":
+            # The server substitutes these at serve time; nothing does it for a
+            # static build, so an unsubstituted BUILD would pin every deploy to
+            # one cache name and serve the first build's JavaScript forever.
+            with open(dst, encoding="utf-8") as handle:
+                source = handle.read()
+            source = source.replace('"__GAFFER_BUILD__"', json.dumps(build))
+            with open(dst, "w", encoding="utf-8") as handle:
+                handle.write(source)
+        elif name == "manifest.webmanifest":
+            _rewrite_manifest(dst)
         copied.append(name)
     for name in ASSET_DIRS:
         src = os.path.join(WEB_DIR, name)
