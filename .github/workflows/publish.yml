@@ -59,12 +59,41 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Bookmaker odds are optional but rate-limited: the free tier allows 500
+      # requests a month and this workflow runs 720 times. One request covers
+      # every upcoming fixture, and the code refetches only when its cache is
+      # older than six hours — but CI starts with an empty filesystem every run,
+      # so without restoring that cache each build would look "cold" and fetch.
+      #
+      # The key changes once per 6-hour bucket. Inside a bucket the exact key
+      # hits and the cached odds are reused; when the bucket rolls over there is
+      # no exact hit, restore-keys supplies the previous (now stale) cache, the
+      # code sees it is over six hours old and fetches once. That is ~120
+      # requests a month, comfortably inside the free tier.
+      - name: Work out the odds cache bucket
+        id: oddsbucket
+        run: echo "key=$(( $(date -u +%s) / 21600 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached odds
+        uses: actions/cache@v4
+        with:
+          path: data/cache/odds_epl.json
+          key: odds-${{ steps.oddsbucket.outputs.key }}
+          restore-keys: odds-
+
       # The FPL API is the one thing here that can fail for reasons outside this
       # repo. Fail loudly and early rather than publishing a half-built site.
       - name: Check the scoring rules still match the live API
         run: python -m gaffer.core.scoring --verify
 
       - name: Build the site
+        # ODDS_API_KEY is optional. Unset, the model runs on its own fitted
+        # ratings and the build is identical to before. Set as a repository
+        # secret, the betting market overrides the fixture forecast where prices
+        # exist. The key is never written into the exported site — only the
+        # derived goal rates ship.
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: python -m gaffer.cli export --out site --horizon 6
 
       # A published site that silently lost its data is worse than a failed

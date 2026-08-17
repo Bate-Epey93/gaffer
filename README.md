@@ -424,6 +424,48 @@ the free tier spins down and cannot mount the disk that keeps the cache warm.
 The server is password-protected whenever it is reachable from anywhere but
 loopback — see **Configuration** for `GAFFER_PASSWORD`.
 
+## Bookmaker odds (optional, free)
+
+The team ratings are fitted on last season's results, and three of this season's
+clubs have no Premier League history at all. The betting market has neither problem:
+it has already priced the summer's transfers, the manager changes and this morning's
+team news. Feeding its implied goal rates into the fixture forecast is the cheapest
+real accuracy gain available.
+
+Get a free key at [the-odds-api.com](https://the-odds-api.com) (500 requests/month),
+then either export it locally:
+
+```bash
+export ODDS_API_KEY=your_key_here
+```
+
+…or, for the published site, add it as a repository secret named `ODDS_API_KEY`
+(**Settings → Secrets and variables → Actions → New repository secret**). The key
+never reaches the exported site — only the derived goal rates ship.
+
+`gaffer verify` reports whether the market is actually in play:
+
+```
+3. bookmaker odds (optional)
+| fixtures priced | 10                                        |
+| status          | fetched 10 event(s); 487 request(s) left  |
+```
+
+**On the budget.** One request covers every upcoming fixture, and the cache is only
+refreshed when it is over 6 hours old — about 120 requests a month against the free
+500, even though the site rebuilds hourly. CI restores that cache between runs; without
+it every build would look cold and the quota would be gone in three weeks.
+
+Everything degrades quietly: no key, no network, or an exhausted quota all fall back
+to the fitted ratings, and a stale cache is preferred over nothing because yesterday's
+market still beats a rating fitted before the transfer window shut.
+
+**Sportmonks is not worth it.** Its free plan covers only the Danish Superliga and
+Scottish Premiership — the Premier League is paid-only, from €29/month, plus €24-29
+for the xG add-on. Most of what it would give you (xG, xA, xGC, defensive actions,
+minutes, ownership, prices) is already in the free FPL API. The one genuine addition
+is predicted lineups, which sits behind a €199/month add-on on a higher tier.
+
 ## Running it unattended (macOS)
 
 Two launchd LaunchAgents: the server starts at login and is restarted if it dies, and

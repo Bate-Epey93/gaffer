@@ -1172,6 +1172,28 @@ def cmd_verify(args: argparse.Namespace, ctx: Context) -> int:
     ))
     failed = [c for c in checks if not c[1]]
     print("\n%d checks, %d passed, %d failed" % (len(checks), len(checks) - len(failed), len(failed)))
+
+    # Odds are optional, so their absence is not a failed check — but whether
+    # the market is in play changes how much to trust a pre-season forecast, and
+    # that should never be something you have to guess at.
+    report = getattr(ctx.engine, "odds_report", None) if ctx.engine else None
+    if report is not None:
+        from gaffer.data import odds as odds_mod
+        age = odds_mod.cache_age_hours(CACHE_DIR)
+        print(heading("3. bookmaker odds (optional)"))
+        print(render_table(
+            ["item", "value"],
+            [
+                ["fixtures priced", report.get("applied", 0)],
+                ["status", trunc(report.get("status", "—"), 70)],
+                ["cache age", "%.1fh" % age if age is not None else "no cache"],
+                ["unrecognised clubs", ", ".join(report.get("unmatched_names") or []) or "none"],
+            ],
+            align="ll",
+        ))
+        if not report.get("applied"):
+            print("  The model is running on its own fitted ratings. Set ODDS_API_KEY "
+                  "to overlay the betting market.")
     return EXIT_OK if not failed else EXIT_FAIL
 
 

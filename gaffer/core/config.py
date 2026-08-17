@@ -117,6 +117,11 @@ class Config:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     cache_ttl_seconds: int = 300
     odds_api_key: Optional[str] = None
+    # The Odds API free tier allows 500 requests a month and the site rebuilds
+    # hourly (720). One request covers every upcoming fixture, so refetching at
+    # most every 6 hours is ~120 a month — inside the free tier with room for
+    # manual builds before a deadline.
+    odds_min_refresh_hours: float = 6.0
     log_level: str = "INFO"
 
     @classmethod

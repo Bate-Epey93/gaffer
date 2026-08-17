@@ -479,6 +479,40 @@ class XPEngine:
 
     # -- fitting ------------------------------------------------------------
 
+    def _apply_market_odds(self, state: "GameState") -> Dict[str, Any]:
+        """Feed bookmaker prices into the team ratings, if any are available.
+
+        Deliberately swallows everything: odds are an enhancement, and a dead
+        third-party API must never be able to stop a projection being produced
+        ninety minutes before a deadline.
+        """
+        try:
+            from gaffer.core.config import CACHE_DIR
+            from gaffer.data import odds as odds_mod
+
+            payload = odds_mod.load_odds(
+                CACHE_DIR,
+                key=getattr(self.config, "odds_api_key", None),
+                min_refresh_hours=float(getattr(self.config, "odds_min_refresh_hours",
+                                                odds_mod.DEFAULT_MIN_REFRESH_HOURS)),
+            )
+            report = odds_mod.apply_to_model(self.team, state, payload)
+            if report.get("applied"):
+                self.warnings.append(
+                    "odds: %d fixture(s) priced from the market — %s"
+                    % (report["applied"], report.get("status", "")))
+            elif payload.get("events"):
+                self.warnings.append("odds: fetched but matched no fixtures — %s"
+                                     % (report.get("unmatched_names") or "unknown clubs"))
+            if report.get("unmatched_names"):
+                self.warnings.append("odds: unrecognised club name(s) %s; add them to "
+                                     "gaffer.data.odds.ODDS_NAME_TO_SHORT"
+                                     % ", ".join(report["unmatched_names"]))
+            return report
+        except Exception as exc:  # never fatal
+            self.warnings.append("odds: skipped (%s)" % exc)
+            return {"applied": 0, "status": "error: %s" % exc}
+
     def fit(self, state: "GameState", refit: bool = False) -> "XPEngine":
         """Fit every sub-model, in dependency order.
 
@@ -497,6 +531,14 @@ class XPEngine:
         self.team.fit(state=state)
         self.fit_seconds["team_ratings"] = time.time() - t0
         self.warnings.extend("team_ratings: %s" % w for w in self.team.warnings)
+
+        # Overlay the betting market on the fitted ratings where prices exist.
+        # Pre-season this is the single largest available accuracy gain: the
+        # ratings are fitted on last season, three clubs have no top-flight
+        # history at all, and the market has already priced the summer. Entirely
+        # optional — without ODDS_API_KEY this is a no-op and the model runs on
+        # its own ratings exactly as before.
+        self.odds_report = self._apply_market_odds(state)
 
         t0 = time.time()
         self.minutes.fit(state)
