@@ -177,3 +177,49 @@ def test_app_registers_the_worker_relatively(site):
         source = fh.read()
     assert "register('sw.js'" in source
     assert "register('/sw.js'" not in source
+
+
+# --- cache busting and the My Team assets ----------------------------------
+
+def test_sample_js_is_exported(site):
+    """index.html loads it; leaving it out 404'd on every page load."""
+    assert os.path.exists(os.path.join(site["dir"], "sample.js"))
+
+
+def test_myteam_assets_are_exported(site):
+    for name in ("myteam.js", "myteam-view.js"):
+        assert os.path.exists(os.path.join(site["dir"], name)), name
+
+
+def test_index_stamps_asset_urls_with_the_build(site):
+    """Without a stamp a phone keeps serving the previous deploy's JavaScript
+    out of its HTTP cache, and a pushed fix stays invisible."""
+    with open(os.path.join(site["dir"], "index.html"), encoding="utf-8") as fh:
+        html = fh.read()
+    import re
+    srcs = re.findall(r'src="([^"]+\.js[^"]*)"', html)
+    assert srcs, "no scripts in index.html"
+    for src in srcs:
+        assert "?v=" in src, "unstamped asset: %s" % src
+    stamps = set(re.findall(r'\?v=([0-9a-f]+)', html))
+    assert len(stamps) == 1, "inconsistent build stamps: %s" % stamps
+
+
+def test_every_stamped_asset_actually_exists(site):
+    """A stamp must not change which file is requested."""
+    import re
+    with open(os.path.join(site["dir"], "index.html"), encoding="utf-8") as fh:
+        html = fh.read()
+    for src in re.findall(r'src="([^"]+)"', html):
+        bare = src.split("?")[0]
+        assert os.path.exists(os.path.join(site["dir"], bare)), "missing %s" % bare
+
+
+def test_service_worker_precaches_the_stamped_urls(site):
+    """The worker must precache what the document requests, or every asset is
+    a cache miss and the offline shell is empty."""
+    with open(os.path.join(site["dir"], "sw.js"), encoding="utf-8") as fh:
+        sw = fh.read()
+    assert '"__GAFFER_SHELL__"' not in sw
+    assert "const SHELL_INJECTED = [" in sw
+    assert "app.js?v=" in sw

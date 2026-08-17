@@ -827,6 +827,8 @@
     return store.planLoading;
   }
 
+  G.loadPlan = loadPlan;
+
   function loadCaptain(gw, force) {
     if (store.mode === 'sample') return Promise.resolve(store.captainByGw[gw] || null);
     if (store.captainByGw[gw] && !force) return Promise.resolve(store.captainByGw[gw]);
@@ -893,7 +895,7 @@
 
   // -------------------------------------------------------------- router --
 
-  var VIEWS = ['squad', 'players', 'planner', 'captain', 'chips'];
+  var VIEWS = ['squad', 'players', 'planner', 'captain', 'chips', 'myteam'];
 
   function renderView(name, force) {
     if (VIEWS.indexOf(name) < 0) name = 'squad';

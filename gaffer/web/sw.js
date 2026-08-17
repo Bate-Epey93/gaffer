@@ -41,6 +41,8 @@ const SHELL = Array.isArray(SHELL_INJECTED) ? SHELL_INJECTED : [
   BASE + "sample.js",
   BASE + "ui.js",
   BASE + "views.js",
+  BASE + "myteam.js",
+  BASE + "myteam-view.js",
   BASE + "app.js",
   BASE + "manifest.webmanifest",
   BASE + "icons/icon-180.png",

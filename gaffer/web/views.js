@@ -1261,6 +1261,7 @@
     planner: plannerView,
     captain: captainView,
     chips: chipsView,
+    myteam: function (host) { return G.myteamView(host); },
     drawer: drawerView,
     updateCountdown: updateCountdown
   };

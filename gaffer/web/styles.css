@@ -599,3 +599,63 @@ button.t-name:hover, button.linkish:hover { color: var(--accent); border-bottom-
    promises something this build cannot do. The snapshot rebuilds on its own
    schedule, which the banner explains. */
 body.is-static #btn-refresh { display: none; }
+
+/* ------------------------------------------------------------- My Team ---
+   The squad editor and the against-the-optimiser comparison. Rows stay legible
+   at 375px: the name column flexes and everything else is fixed width, so the
+   numbers line up in a column rather than drifting with name length. */
+.myteam-list { display: flex; flex-direction: column; gap: 2px; }
+.myteam-row {
+  display: flex; align-items: center; gap: .6rem;
+  padding: .5rem .6rem; border-radius: 8px; background: var(--panel-2, #12151a);
+}
+.myteam-name { flex: 1 1 auto; min-width: 0; }
+.myteam-name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.myteam-cost { flex: 0 0 3.6rem; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.myteam-xp   { flex: 0 0 3rem;  text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.myteam-flag { font-size: .78rem; margin-top: .15rem; }
+.myteam-flag.bad  { color: var(--neg, #ff6b6b); }
+.myteam-flag.warn { color: var(--warn, #e8b339); }
+
+.myteam-subhead { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em;
+                  color: var(--muted); margin: 1rem 0 .4rem; }
+
+.myteam-problems { border-left: 3px solid var(--warn, #e8b339); padding-left: .75rem; }
+.myteam-problems ul { margin: .35rem 0 0; padding-left: 1.1rem; }
+.myteam-problems li { margin: .2rem 0; }
+
+.myteam-results { display: flex; flex-direction: column; gap: 2px; margin-top: .6rem; }
+.myteam-add {
+  display: flex; align-items: center; gap: .5rem; width: 100%;
+  padding: .5rem .6rem; border-radius: 8px; text-align: left;
+  background: var(--panel-2, #12151a); border: 1px solid transparent;
+  color: inherit; font: inherit; cursor: pointer;
+}
+.myteam-add:hover, .myteam-add:focus-visible { border-color: var(--accent, #3ee0b8); }
+.myteam-add .myteam-xp { margin-left: auto; }
+
+/* A swap is colour-coded by whether it costs you points, not by whether it
+   differs from the optimiser: "different" is not "wrong", and a gap inside the
+   model's error is shown neutral so it does not read as a call to action. */
+.myteam-swaps { display: flex; flex-direction: column; gap: .5rem; }
+.myteam-swap {
+  padding: .6rem .7rem; border-radius: 8px;
+  background: var(--panel-2, #12151a); border-left: 3px solid var(--muted);
+}
+.myteam-swap.bad     { border-left-color: var(--neg, #ff6b6b); }
+.myteam-swap.good    { border-left-color: var(--accent, #3ee0b8); }
+.myteam-swap.neutral { border-left-color: var(--muted, #6b7280); }
+.myteam-swap-head { display: flex; align-items: center; gap: .35rem; flex-wrap: wrap; }
+.myteam-swap-head .out  { text-decoration: line-through; opacity: .75; }
+.myteam-swap-head .into { font-weight: 600; }
+.myteam-delta { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; }
+.myteam-why { margin: .35rem 0 0; font-size: .88rem; color: var(--muted); }
+
+.input {
+  background: var(--panel-2, #12151a); color: inherit; font: inherit;
+  border: 1px solid var(--line, #262b33); border-radius: 8px; padding: .45rem .6rem;
+}
+.input:focus-visible { outline: 2px solid var(--accent, #3ee0b8); outline-offset: 1px; }
+.row { display: flex; }
+p.ok   { color: var(--accent, #3ee0b8); }
+p.warn { color: var(--warn, #e8b339); }

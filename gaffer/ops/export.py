@@ -42,11 +42,24 @@ ASSET_FILES = (
     "app.js",
     "ui.js",
     "views.js",
+    "myteam.js",
+    "myteam-view.js",
+    # index.html loads this for the offline/sample fallback; leaving it out
+    # produced a 404 on every page load of the published site.
+    "sample.js",
     "styles.css",
     "sw.js",
     "manifest.webmanifest",
 )
 ASSET_DIRS = ("icons",)
+
+# Assets whose URLs get a ?v= build stamp inside index.html, so a browser that
+# already holds the previous deploy does not keep serving it from its HTTP
+# cache. The live server stamps these with each file's mtime; a static build has
+# no server to do that, and without it a pushed fix can sit invisible behind a
+# stale app.js for as long as the browser feels like caching it.
+STAMPED_ASSETS = ("app.js", "ui.js", "views.js", "myteam.js", "myteam-view.js",
+                  "sample.js", "styles.css")
 
 
 class ExportError(RuntimeError):
@@ -100,9 +113,30 @@ def _rewrite_manifest(path: str) -> None:
         json.dump(manifest, handle, indent=2)
 
 
+def _stamp_index(path: str, build: str) -> None:
+    """Rewrite index.html's asset URLs to carry the build stamp."""
+    with open(path, encoding="utf-8") as handle:
+        html = handle.read()
+    for name in STAMPED_ASSETS:
+        html = html.replace('src="%s"' % name, 'src="%s?v=%s"' % (name, build))
+        html = html.replace('href="%s"' % name, 'href="%s?v=%s"' % (name, build))
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(html)
+
+
 def _copy_assets(out_dir: str) -> List[str]:
     copied = []
     build = _shell_build_hash(out_dir)
+    # The stamped URLs the document will actually request. The worker precaches
+    # exactly these, so a precached hit is provably the right bytes for this
+    # build — which is what lets the shell be served cache-first with no
+    # revalidation at all.
+    shell = ["./"] + [
+        "%s?v=%s" % (name, build) for name in STAMPED_ASSETS
+    ] + ["manifest.webmanifest",
+         "icons/icon-180.png", "icons/icon-192.png",
+         "icons/icon-512.png", "icons/icon-512-maskable.png"]
+
     for name in ASSET_FILES:
         src = os.path.join(WEB_DIR, name)
         if not os.path.exists(src):
@@ -116,10 +150,13 @@ def _copy_assets(out_dir: str) -> List[str]:
             with open(dst, encoding="utf-8") as handle:
                 source = handle.read()
             source = source.replace('"__GAFFER_BUILD__"', json.dumps(build))
+            source = source.replace('"__GAFFER_SHELL__"', json.dumps(shell))
             with open(dst, "w", encoding="utf-8") as handle:
                 handle.write(source)
         elif name == "manifest.webmanifest":
             _rewrite_manifest(dst)
+        elif name == "index.html":
+            _stamp_index(dst, build)
         copied.append(name)
     for name in ASSET_DIRS:
         src = os.path.join(WEB_DIR, name)
