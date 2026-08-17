@@ -82,6 +82,10 @@ class GWView:
     gw: int
     xp: Dict[int, float] = field(default_factory=dict)
     sd: Dict[int, float] = field(default_factory=dict)
+    # Expected points available in the right tail: P(haul) x how far a haul
+    # clears the mean. This, not the standard deviation, is what the armband is
+    # actually buying — sd is symmetric and counts a blank as "upside".
+    tail: Dict[int, float] = field(default_factory=dict)
     p_appear: Dict[int, float] = field(default_factory=dict)
     xmins: Dict[int, float] = field(default_factory=dict)
     n_fixtures: Dict[int, int] = field(default_factory=dict)
@@ -99,14 +103,30 @@ def build_views(
 ) -> Dict[int, GWView]:
     kickoff_by_fixture = {f.id: (f.kickoff_time or "") for f in state.fixtures}
     views: Dict[int, GWView] = {}
+    # Imported lazily: strategy pulls pick_lineup back out of this module, and a
+    # module-level import in both directions is a cycle waiting to happen.
+    try:
+        from gaffer.optimize.strategy import haul_profiles
+    except Exception:  # pragma: no cover - the ceiling term is optional
+        haul_profiles = None
     for gw in gws:
         view = GWView(gw=int(gw))
+        profiles = {}
+        if haul_profiles is not None:
+            try:
+                profiles = haul_profiles(projections, int(gw))
+            except Exception:
+                profiles = {}
         for pid, per_gw in projections.projections.items():
             gwp = per_gw.get(int(gw))
             if gwp is None:
                 continue
             view.xp[pid] = gwp.xp
             view.sd[pid] = gwp.sd
+            prof = profiles.get(pid)
+            view.tail[pid] = (
+                prof.p_haul * max(0.0, prof.e_points_if_haul - gwp.xp) if prof else 0.0
+            )
             view.n_fixtures[pid] = len(gwp.fixtures)
             view.xmins[pid] = sum(f.xmins for f in gwp.fixtures)
             # A double gameweek gives two independent chances to appear.
@@ -625,6 +645,7 @@ def solve_squad_milp(
             )
 
     decay = float(config.optimizer.decay)
+    ceiling_weight = max(0.0, float(getattr(config.optimizer, "captain_ceiling_weight", 0.0)))
     out_weights, gk_weight = bench_weights(config)
     if bench_mode not in ("ordered", "flat"):
         raise OptimizeError("bench_mode must be 'ordered' or 'flat'")
@@ -661,7 +682,16 @@ def solve_squad_milp(
             xp = view.get_xp(p)
             if xp:
                 terms.append(d * xp * y[(p, w)])
-                terms.append(d * xp * c[(p, w)])
+                # The armband doubles one player, so its value is the right
+                # tail rather than the average. With ceiling_weight at 0 this is
+                # exactly the old mean-only term; above 0 a high-variance
+                # premium is preferred to a marginally higher-mean safe pick,
+                # which is the trade a manager chasing overall rank wants and
+                # the one a manager protecting a rank does not.
+                cap = xp
+                if ceiling_weight:
+                    cap += ceiling_weight * max(0.0, float(view.tail.get(p, 0.0)))
+                terms.append(d * cap * c[(p, w)])
         for p in pool:
             if position[p] == scoring.GKP and gk_weight:
                 xp = view.get_xp(p)

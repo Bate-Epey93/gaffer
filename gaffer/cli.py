@@ -538,6 +538,8 @@ def cmd_squad(args: argparse.Namespace, ctx: Context) -> int:
     config.optimizer.locked_out = parse_ids(args.lock_out, state)
     if args.decay is not None:
         config.optimizer.decay = float(args.decay)
+    if getattr(args, "captain_ceiling", None) is not None:
+        config.optimizer.captain_ceiling_weight = float(args.captain_ceiling)
 
     pick_initial_squad = resolve_peer("pick_initial_squad")
     budget = int(round(float(args.budget) * 10))
@@ -1266,6 +1268,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="budget in £m (default %.1f)" % (scoring.BUDGET_TENTHS / 10.0))
     p.add_argument("--lock-in", help="players that must be in the squad (ids or names)")
     p.add_argument("--lock-out", help="players that must not be (ids or names)")
+    p.add_argument("--captain-ceiling", type=float, metavar="W",
+                   help="value the armband's ceiling as well as its mean: the captain "
+                        "slot scores xp + W*sd. 0 (default) is pure expected points; "
+                        "0.3-0.5 buys variance, which is what climbing rank needs")
     p.add_argument("--chip", choices=sorted(scoring.CHIP_WINDOWS),
                    help="assume this chip is active in the first gameweek")
     p.add_argument("--decay", type=float, help="per-gameweek weight decay (default %.2f)"

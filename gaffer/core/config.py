@@ -105,6 +105,17 @@ class OptimizerConfig:
     locked_out: List[int] = field(default_factory=list)
     # Risk appetite: 0 = pure expected points, 1 = maximum differential chasing.
     differential_weight: float = 0.0
+    # How much the captaincy slot values *ceiling* on top of mean expected
+    # points. The armband doubles one player, so what it is really worth is the
+    # right tail, not the average -- and the objective otherwise sees a 30.1 xP
+    # midfielder and a 29.5 xP striker with a far bigger spread as very nearly
+    # the same thing. The captain's contribution becomes xp + w * sd.
+    #
+    # 0.0 reproduces the old behaviour exactly and stays the default: this is a
+    # deliberate risk preference, not a free accuracy win. Raising it buys
+    # variance, which is what climbing overall rank needs and what protecting a
+    # rank does not. ~0.3-0.5 is a sane range; 1.0 is aggressive.
+    captain_ceiling_weight: float = 0.0
     # Ignore players below this projected minutes threshold entirely.
     min_xmins_to_consider: float = 10.0
 
