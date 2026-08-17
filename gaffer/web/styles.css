@@ -1,42 +1,77 @@
-/* gaffer dashboard — dark, dense, information first.
+/* gaffer dashboard — Fantasy Premier League livery, liquid glass.
  *
- * Colour discipline:
- *   - ONE accent (--accent) for the primary action and the active state. Nothing else.
- *   - Fixture difficulty is the only continuous scale, computed in ui.js from our
- *     own model lambdas. It runs deep navy (hard) -> grey -> gold (easy): a
- *     lightness ramp, so it survives every form of colour blindness, and every
- *     cell also prints a 1-5 rank so colour is never the sole encoding.
- *   - Positive / negative point components are steel vs rose AND carry a sign.
+ * The palette is FPL's own: #37003C deep purple as the ground, #00FF87 as the
+ * single accent, #04F5FF cyan for information and #E90052 magenta for loss.
+ * Using the game's colours means a number here reads the same way it reads in
+ * the app you cross-check it against, which matters more than originality when
+ * you are comparing two screens ninety minutes before a deadline.
+ *
+ * The glass. Surfaces are translucent white over a fixed purple field, blurred
+ * behind, with a brighter hairline along the top edge — a specular highlight is
+ * what makes a pane read as glass rather than as a grey box. Three rules keep
+ * it from becoming unreadable decoration:
+ *
+ *   1. Blur costs GPU per layer, so only structural surfaces get it — topbar,
+ *      tabs, panels, tiles, drawer. Never rows, never table cells; a list of
+ *      587 blurred rows drops a phone to single-figure frame rates.
+ *   2. Text never sits directly on glass at low contrast. Body copy is near
+ *      white on a dark field, and the surface tint is capped so contrast holds.
+ *   3. Every effect degrades. Without backdrop-filter the panes fall back to
+ *      opaque tinted surfaces, and prefers-reduced-transparency turns the glass
+ *      off entirely rather than shipping something unreadable.
+ *
+ * Colour discipline, unchanged and still load-bearing:
+ *   - ONE accent (--accent) for the primary action and the active state.
+ *   - Fixture difficulty is the only continuous scale, computed in ui.js from
+ *     our own model lambdas. It is a LIGHTNESS ramp so it survives every form
+ *     of colour blindness, and every cell also prints a 1-5 rank so colour is
+ *     never the sole encoding. Those cells keep their own opaque background so
+ *     the ramp is read against a constant ground, not through glass.
+ *   - Positive / negative point components are cyan vs magenta AND carry a sign.
  */
 
 :root {
-  --bg: #07080a;
-  --bg-2: #0b0d11;
-  --panel: #0e1116;
-  --panel-2: #12161c;
-  --panel-3: #171c24;
-  --line: #1b2029;
-  --line-2: #262d38;
+  /* The field the glass sits on. */
+  --bg: #1a0020;
+  --bg-2: #2b0033;
+  --purple: #37003C;
+  --purple-2: #4a0052;
 
-  --ink: #e9edf3;
-  --ink-2: #98a2b1;
-  --ink-3: #69727f;
+  /* Glass surfaces: translucent white, increasing in opacity with elevation. */
+  --glass-1: rgba(255, 255, 255, .045);
+  --glass-2: rgba(255, 255, 255, .075);
+  --glass-3: rgba(255, 255, 255, .11);
+  --glass-line: rgba(255, 255, 255, .14);
+  --glass-edge: rgba(255, 255, 255, .30);   /* the specular top edge */
+  --blur: saturate(150%) blur(18px);
 
-  --accent: #31d0aa;
-  --accent-dim: #1d7a63;
-  --accent-ink: #04120e;
+  /* Opaque equivalents, used as the no-backdrop-filter fallback and by any
+     element that must not be see-through (menus, table cells). */
+  --panel: #2a0b31;
+  --panel-2: #33113b;
+  --panel-3: #3d1746;
+  --line: rgba(255, 255, 255, .10);
+  --line-2: rgba(255, 255, 255, .18);
 
-  --pos: #7aa7d8;
-  --neg: #dd7590;
-  --warn: #e0ac4f;
-  --crit: #e2585f;
+  --ink: #ffffff;
+  --ink-2: #cbb8d4;
+  --ink-3: #9b86a6;
+
+  --accent: #00FF87;          /* FPL green */
+  --accent-dim: #00b25e;
+  --accent-ink: #06231a;      /* text on the green */
+
+  --pos: #04F5FF;             /* FPL cyan */
+  --neg: #E90052;             /* FPL magenta */
+  --warn: #FFC145;
+  --crit: #E90052;
 
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
           Arial, "Noto Sans", sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
           "Liberation Mono", monospace;
 
-  --r: 8px;
+  --r: 14px;                  /* glass wants a softer corner than a flat box */
   --topbar-h: 52px;
   --tabs-h: 40px;
 }
@@ -51,12 +86,54 @@ html, body { height: 100%; }
 
 body {
   margin: 0;
-  background: var(--bg);
   color: var(--ink);
   font: 13px/1.45 var(--sans);
   -webkit-font-smoothing: antialiased;
   font-variant-numeric: tabular-nums;
   overflow-y: scroll;
+
+  /* Two soft light sources over a purple base. Fixed, so the glass has
+     something that does not move to refract, and the page does not repaint a
+     gradient on every scroll frame. */
+  background:
+    radial-gradient(1100px 700px at 12% -8%, rgba(0, 255, 135, .16), transparent 60%),
+    radial-gradient(900px 620px at 92% 4%, rgba(4, 245, 255, .13), transparent 62%),
+    radial-gradient(760px 520px at 60% 108%, rgba(233, 0, 82, .11), transparent 60%),
+    linear-gradient(178deg, var(--bg-2) 0%, var(--bg) 55%, #12001a 100%);
+  background-attachment: fixed;
+  background-color: var(--bg);
+}
+
+/* The glass recipe, applied by composition rather than repeated per component.
+   `--tint` lets a caller pick its elevation without restating the rest. */
+.glass {
+  background: var(--tint, var(--glass-1));
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-line);
+  /* The inset highlight along the top edge is the whole illusion: a pane of
+     glass catches light where it meets the air. Without it this is just a
+     translucent rectangle. */
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-edge),
+    inset 0 -1px 0 0 rgba(0, 0, 0, .18),
+    0 8px 30px rgba(0, 0, 0, .28);
+}
+
+/* Fallback: no backdrop-filter means no blur, so the surfaces become opaque
+   rather than a smear of unreadable transparency. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass, .topbar, .tabs, .panel, .stat, .drawer { background: var(--panel) !important; }
+}
+
+/* Some people get motion sick or simply cannot read through texture. Honour it:
+   the layout is identical, the glass just stops being glass. */
+@media (prefers-reduced-transparency: reduce) {
+  .glass, .topbar, .tabs, .panel, .stat, .drawer {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    background: var(--panel) !important;
+  }
 }
 
 button, input, select { font: inherit; color: inherit; font-variant-numeric: tabular-nums; }
@@ -87,8 +164,13 @@ button, input, select { font: inherit; color: inherit; font-variant-numeric: tab
            calc(14px + env(safe-area-inset-right, 0px))
            0
            calc(14px + env(safe-area-inset-left, 0px));
-  background: linear-gradient(180deg, #0d1015, #0a0c10);
-  border-bottom: 1px solid var(--line);
+  /* Sticky and translucent: the content scrolling beneath it is what sells the
+     glass, so this deliberately does not get an opaque background. */
+  background: var(--glass-2);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border-bottom: 1px solid var(--glass-line);
+  box-shadow: inset 0 1px 0 0 var(--glass-edge), 0 4px 24px rgba(0, 0, 0, .30);
 }
 
 body.is-sample .topbar {
@@ -143,15 +225,17 @@ body.is-stale .topbar {
 
 .btn {
   height: 28px; padding: 0 11px; border-radius: 6px; cursor: pointer;
-  border: 1px solid var(--line-2); background: var(--panel-2); color: var(--ink);
+  border: 1px solid var(--glass-line); background: var(--glass-2); color: var(--ink);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
   font-size: 12px; white-space: nowrap;
 }
-.btn:hover { border-color: #38414f; background: var(--panel-3); }
+.btn:hover { border-color: var(--line-2); background: var(--glass-3); }
 .btn:active { transform: translateY(1px); }
 .btn[disabled] { opacity: .45; cursor: default; transform: none; }
 .btn-ghost { background: transparent; color: var(--ink-2); }
 .btn-accent { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
-.btn-accent:hover { background: #3ee0b8; border-color: #3ee0b8; }
+.btn-accent:hover { background: #4dffab; border-color: #4dffab; }
+.btn-accent { box-shadow: 0 4px 16px rgba(0, 255, 135, .28); }
 .btn-sm { height: 24px; padding: 0 8px; font-size: 11px; }
 
 /* ------------------------------------------------------------------ tabs */
@@ -159,7 +243,10 @@ body.is-stale .topbar {
 .tabs {
   position: sticky; top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px)); z-index: 39;
   display: flex; gap: 2px; height: var(--tabs-h); padding: 0 10px;
-  background: var(--bg-2); border-bottom: 1px solid var(--line);
+  background: var(--glass-1);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border-bottom: 1px solid var(--glass-line);
   overflow-x: auto; scrollbar-width: none;
 }
 .tabs::-webkit-scrollbar { display: none; }
@@ -177,13 +264,29 @@ body.is-stale .topbar {
 
 /* ---------------------------------------------------------------- banner */
 
+/* Tinted glass rather than a flat block, so a warning still belongs to the
+   same surface family as everything else. The colour carries the severity and
+   the copy carries the meaning; neither alone. */
 .banner {
-  margin: 10px 14px 0; padding: 9px 12px; border-radius: var(--r);
-  border: 1px solid #4a3a1c; background: #14100a; color: #e8d4ab; font-size: 12px;
+  margin: 10px 14px 0; padding: 11px 13px; border-radius: var(--r);
+  border: 1px solid rgba(255, 193, 69, .38);
+  background: rgba(255, 193, 69, .10);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, .16);
+  color: #ffe4ad; font-size: 12px;
   display: flex; gap: 10px; align-items: flex-start;
 }
-.banner.err { border-color: #4d2126; background: #150c0e; color: #f0c3c8; }
-.banner b { color: #fff; font-weight: 650; }
+.banner.err {
+  border-color: rgba(233, 0, 82, .45);
+  background: rgba(233, 0, 82, .12);
+  color: #ffc6d8;
+}
+.banner.info {
+  border-color: rgba(4, 245, 255, .38);
+  background: rgba(4, 245, 255, .10);
+  color: #bff4f8;
+}
+.banner b { color: #fff; font-weight: 700; }
 .banner .banner-actions { margin-left: auto; display: flex; gap: 6px; flex: none; }
 .banner code { font-family: var(--mono); font-size: 11px; background: #00000055;
   padding: 1px 5px; border-radius: 4px; }
@@ -210,7 +313,15 @@ body.is-stale .topbar {
 .tag.crit { color: var(--crit); border-color: #4d2126; background: #170b0c; }
 
 .panel {
-  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--glass-1);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--r);
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-edge),
+    inset 0 -1px 0 0 rgba(0, 0, 0, .16),
+    0 8px 30px rgba(0, 0, 0, .26);
 }
 .panel-head {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -223,8 +334,13 @@ body.is-stale .topbar {
 
 .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .stat {
-  flex: 1 1 132px; min-width: 118px; padding: 9px 11px;
-  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+  flex: 1 1 132px; min-width: 118px; padding: 11px 13px;
+  background: var(--glass-2);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--r);
+  box-shadow: inset 0 1px 0 0 var(--glass-edge), 0 6px 20px rgba(0, 0, 0, .22);
 }
 .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
   color: var(--ink-3); }
@@ -239,22 +355,73 @@ body.is-stale .topbar {
 @media (max-width: 1000px) { .squad-grid { grid-template-columns: minmax(0, 1fr); } }
 
 .pitch {
-  padding: 14px 10px;
+  position: relative;
+  padding: 18px 10px;
+  /* Turf, the way the game draws it: mown stripes over a green field, darker
+     at the edges. Deliberately desaturated and dark — this is the ground the
+     player cards sit on, not a feature in its own right, and a bright pitch
+     would fight every number printed on top of it. */
   background:
-    repeating-linear-gradient(180deg, rgba(255,255,255,.014) 0 44px, transparent 44px 88px),
-    radial-gradient(120% 70% at 50% 0%, #101922 0%, #0b0e12 60%, #090b0e 100%);
-  border: 1px solid var(--line); border-radius: var(--r);
+    repeating-linear-gradient(180deg,
+      rgba(255, 255, 255, .030) 0 46px,
+      rgba(0, 0, 0, .045) 46px 92px),
+    radial-gradient(130% 78% at 50% 0%,
+      #12492f 0%, #0d3a26 45%, #08281a 78%, #061c13 100%);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: var(--r);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, .16),
+    inset 0 0 60px rgba(0, 0, 0, .45);
   display: grid; gap: 10px;
+  overflow: hidden;
 }
-.prow { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
+
+/* Halfway line and centre circle, faint. Pure decoration, so it is drawn with
+   a pseudo-element and marked aria-hidden by construction — it adds nothing to
+   the accessibility tree and nothing to the DOM the views build. */
+.pitch::before {
+  content: "";
+  position: absolute; left: 0; right: 0; top: 50%;
+  border-top: 1px solid rgba(255, 255, 255, .10);
+  pointer-events: none;
+}
+.pitch::after {
+  content: "";
+  position: absolute; left: 50%; top: 50%;
+  width: 108px; height: 108px; margin: -54px 0 0 -54px;
+  border: 1px solid rgba(255, 255, 255, .10);
+  border-radius: 50%;
+  pointer-events: none;
+}
+/* A formation row must stay ONE row. Wrapping is what turned a 5-4-1 into a
+   near-vertical column on a phone: five 106px cards need ~590px, so at 375px
+   they broke into 2+2+1 and the pitch grew to three times its height, which is
+   nothing like the shape the team actually lines up in.
+
+   So: no wrap, and the cards flex down instead. `min-width: 0` is the load-
+   bearing half — without it a flex item refuses to shrink below its content
+   and the row overflows rather than compressing. */
+.prow {
+  display: flex; justify-content: center; align-items: stretch;
+  gap: 8px; flex-wrap: nowrap;
+}
 
 .pcard {
-  position: relative; width: 106px; padding: 7px 7px 6px; cursor: pointer;
-  background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 7px;
+  position: relative; cursor: pointer;
+  /* Grow to the ideal width, shrink as far as the row demands. */
+  flex: 1 1 106px; min-width: 0; max-width: 106px;
+  padding: 7px 7px 6px;
+  background: var(--glass-2);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  border: 1px solid var(--glass-line); border-radius: 9px;
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, .18), 0 4px 14px rgba(0, 0, 0, .30);
   text-align: center; transition: border-color .1s, transform .1s;
 }
-.pcard:hover { border-color: #3d4756; transform: translateY(-1px); }
-.pcard.is-cap { border-color: var(--accent-dim); box-shadow: 0 0 0 1px var(--accent-dim) inset; }
+.pcard:hover { border-color: var(--line-2); transform: translateY(-1px); }
+.pcard.is-cap {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset, 0 0 18px -4px var(--accent);
+}
 .pcard-team { font-size: 9.5px; letter-spacing: .1em; color: var(--ink-3); }
 .pcard-name { font-size: 12.5px; font-weight: 620; white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
@@ -286,7 +453,7 @@ body.is-stale .topbar {
 
 .bench { margin-top: 12px; }
 .bench .prow { justify-content: flex-start; }
-.bench .pcard { background: var(--panel); opacity: .92; }
+.bench .pcard { background: var(--glass-1); opacity: .95; }
 .bench-idx { position: absolute; bottom: 3px; left: 5px; font-size: 9px; color: var(--ink-3);
   font-family: var(--mono); }
 
@@ -433,8 +600,14 @@ button.t-name:hover, button.linkish:hover { color: var(--accent); border-bottom-
 .scrim { position: fixed; inset: 0; background: #000a; z-index: 50; }
 .drawer {
   position: fixed; top: 0; right: 0; bottom: 0; width: min(520px, 100%); z-index: 51;
-  background: var(--panel); border-left: 1px solid var(--line-2);
-  overflow-y: auto; box-shadow: -20px 0 60px #0009;
+  /* Heavier tint than a panel: the drawer sits over content and has to stay
+     readable against whatever happens to be behind it. */
+  background: rgba(42, 11, 49, .78);
+  -webkit-backdrop-filter: saturate(160%) blur(28px);
+  backdrop-filter: saturate(160%) blur(28px);
+  border-left: 1px solid var(--glass-line);
+  overflow-y: auto;
+  box-shadow: inset 1px 0 0 0 var(--glass-edge), -24px 0 70px rgba(0, 0, 0, .55);
 }
 /* bottom sheet on a phone. It sits above the tab bar (z-index 51 vs 45), so it
    owns the bottom of the screen and has to clear the home indicator itself. */
@@ -607,20 +780,20 @@ body.is-static #btn-refresh { display: none; }
 .myteam-list { display: flex; flex-direction: column; gap: 2px; }
 .myteam-row {
   display: flex; align-items: center; gap: .6rem;
-  padding: .5rem .6rem; border-radius: 8px; background: var(--panel-2, #12151a);
+  padding: .5rem .6rem; border-radius: 8px; background: rgba(255, 255, 255, .05);
 }
 .myteam-name { flex: 1 1 auto; min-width: 0; }
 .myteam-name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .myteam-cost { flex: 0 0 3.6rem; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 .myteam-xp   { flex: 0 0 3rem;  text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 .myteam-flag { font-size: .78rem; margin-top: .15rem; }
-.myteam-flag.bad  { color: var(--neg, #ff6b6b); }
-.myteam-flag.warn { color: var(--warn, #e8b339); }
+.myteam-flag.bad  { color: var(--neg); }
+.myteam-flag.warn { color: var(--warn); }
 
 .myteam-subhead { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em;
                   color: var(--muted); margin: 1rem 0 .4rem; }
 
-.myteam-problems { border-left: 3px solid var(--warn, #e8b339); padding-left: .75rem; }
+.myteam-problems { border-left: 3px solid var(--warn); padding-left: .75rem; }
 .myteam-problems ul { margin: .35rem 0 0; padding-left: 1.1rem; }
 .myteam-problems li { margin: .2rem 0; }
 
@@ -628,10 +801,12 @@ body.is-static #btn-refresh { display: none; }
 .myteam-add {
   display: flex; align-items: center; gap: .5rem; width: 100%;
   padding: .5rem .6rem; border-radius: 8px; text-align: left;
-  background: var(--panel-2, #12151a); border: 1px solid transparent;
+  background: rgba(255, 255, 255, .05); border: 1px solid transparent;
   color: inherit; font: inherit; cursor: pointer;
 }
-.myteam-add:hover, .myteam-add:focus-visible { border-color: var(--accent, #3ee0b8); }
+.myteam-add:hover, .myteam-add:focus-visible {
+  border-color: var(--accent); background: rgba(0, 255, 135, .10);
+}
 .myteam-add .myteam-xp { margin-left: auto; }
 
 /* A swap is colour-coded by whether it costs you points, not by whether it
@@ -640,10 +815,10 @@ body.is-static #btn-refresh { display: none; }
 .myteam-swaps { display: flex; flex-direction: column; gap: .5rem; }
 .myteam-swap {
   padding: .6rem .7rem; border-radius: 8px;
-  background: var(--panel-2, #12151a); border-left: 3px solid var(--muted);
+  background: rgba(255, 255, 255, .05); border-left: 3px solid var(--muted);
 }
-.myteam-swap.bad     { border-left-color: var(--neg, #ff6b6b); }
-.myteam-swap.good    { border-left-color: var(--accent, #3ee0b8); }
+.myteam-swap.bad     { border-left-color: var(--neg); }
+.myteam-swap.good    { border-left-color: var(--accent); }
 .myteam-swap.neutral { border-left-color: var(--muted, #6b7280); }
 .myteam-swap-head { display: flex; align-items: center; gap: .35rem; flex-wrap: wrap; }
 .myteam-swap-head .out  { text-decoration: line-through; opacity: .75; }
@@ -652,10 +827,98 @@ body.is-static #btn-refresh { display: none; }
 .myteam-why { margin: .35rem 0 0; font-size: .88rem; color: var(--muted); }
 
 .input {
-  background: var(--panel-2, #12151a); color: inherit; font: inherit;
-  border: 1px solid var(--line, #262b33); border-radius: 8px; padding: .45rem .6rem;
+  background: rgba(255, 255, 255, .05); color: inherit; font: inherit;
+  border: 1px solid var(--glass-line); border-radius: 8px; padding: .45rem .6rem;
 }
-.input:focus-visible { outline: 2px solid var(--accent, #3ee0b8); outline-offset: 1px; }
+.input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .row { display: flex; }
-p.ok   { color: var(--accent, #3ee0b8); }
-p.warn { color: var(--warn, #e8b339); }
+p.ok   { color: var(--accent); }
+p.warn { color: var(--warn); }
+
+
+/* --------------------------------------------------------- FPL livery ---
+   Details that make this read as the same family as the game itself rather
+   than a generic dark dashboard. */
+
+/* The wordmark picks up FPL's green-to-cyan sweep. */
+.brand-mark {
+  background: linear-gradient(96deg, var(--accent) 0%, var(--pos) 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 800; letter-spacing: -.3px;
+}
+
+/* The selected tab gets a glowing underline rather than a flat rule: on glass a
+   1px border reads as an artefact, a lit edge reads as selection. */
+.tab[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  box-shadow: 0 1px 12px -2px var(--accent);
+}
+
+/* Position chips in FPL's own key colours, so GKP/DEF/MID/FWD are recognisable
+   at a glance from the game. Text is dark on each so contrast stays high. */
+.pos-chip {
+  display: inline-block; min-width: 34px; text-align: center;
+  padding: 1px 6px; border-radius: 999px;
+  font-size: 10px; font-weight: 700; letter-spacing: .04em;
+}
+.pos-chip.pos-1 { background: var(--warn);   color: #241a00; }  /* GKP */
+.pos-chip.pos-2 { background: var(--pos);    color: #002327; }  /* DEF */
+.pos-chip.pos-3 { background: var(--accent); color: var(--accent-ink); }  /* MID */
+.pos-chip.pos-4 { background: var(--neg);    color: #ffffff; }  /* FWD */
+
+/* Stat tiles: the headline number in FPL green, which is the one thing the eye
+   should land on first. */
+.stat-value { color: var(--accent); font-weight: 750; letter-spacing: -.4px; }
+
+/* Fixture-difficulty cells keep an opaque ground. The ramp is a lightness
+   scale and reading it through a blur would defeat the point of choosing a
+   colour-blind-safe encoding in the first place. */
+.fdr, .fdr-cell, td.fdr { backdrop-filter: none !important; }
+
+/* Panels lift slightly on hover on pointer devices — glass responds to touch.
+   Guarded to hover-capable input so a phone does not paint a stuck state. */
+@media (hover: hover) {
+  .panel { transition: box-shadow .18s ease, border-color .18s ease; }
+  .panel:hover {
+    border-color: var(--line-2);
+    box-shadow:
+      inset 0 1px 0 0 var(--glass-edge),
+      0 12px 38px rgba(0, 0, 0, .34);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel { transition: none; }
+  .btn:active { transform: none; }
+}
+
+
+/* Narrow phones: the row still holds its shape, the type just gets out of the
+   way. Everything here is a size change — nothing reflows, so a 5-4-1 reads as
+   a 5-4-1 at 320px exactly as it does on a desktop. */
+@media (max-width: 560px) {
+  .pitch { padding: 14px 6px; gap: 8px; }
+  .prow { gap: 5px; }
+  .pcard { padding: 6px 4px 5px; border-radius: 8px; }
+  .pcard-team { font-size: 8.5px; letter-spacing: .06em; }
+  .pcard-name { font-size: 11px; }
+  .pcard-line { font-size: 10px; margin-top: 1px; }
+  .pcard-xp { font-size: 11.5px; }
+  .pcard-fx { font-size: 9px; }
+  /* Badges shrink and tuck in, or they clip off the corner of a narrow card. */
+  .pcard-badge { width: 15px; height: 15px; top: -5px; right: -4px; font-size: 9px; }
+  .pcard-flag { width: 13px; height: 13px; top: -5px; left: -4px; }
+  .pitch::after { width: 78px; height: 78px; margin: -39px 0 0 -39px; }
+}
+
+/* Very narrow: drop the fixture chip, which is the least load-bearing thing on
+   the card, before letting the name truncate to nothing. */
+@media (max-width: 380px) {
+  .prow { gap: 4px; }
+  .pcard-fx { display: none; }
+  .pcard-name { font-size: 10.5px; }
+}
+
+/* The bench is a list, not a formation, so it may wrap freely. */
+.bench .prow { flex-wrap: wrap; justify-content: flex-start; }

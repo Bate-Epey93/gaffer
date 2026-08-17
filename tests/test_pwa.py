@@ -29,8 +29,11 @@ from gaffer.api.server import (
 WEB = server.WEB_DIR
 ICONS = os.path.join(WEB, "icons")
 
-BG = "#07080a"
-MINT = (62, 224, 184)          # #3ee0b8
+# The installed app's chrome must match the page it opens, or iOS paints a
+# strip of the old colour above the header on every launch. FPL purple.
+BG = "#12001a"          # manifest background_color
+THEME = "#37003c"       # manifest + meta theme_color
+MINT = (0, 255, 135)           # #00FF87, the FPL green accent
 
 
 def _read(*parts):
@@ -121,7 +124,7 @@ def test_manifest_declares_a_standalone_dark_portrait_app():
     assert m["orientation"] == "portrait"
     assert m["start_url"] == "/" and m["scope"] == "/"
     assert m["background_color"].lower() == BG
-    assert m["theme_color"].lower() == BG
+    assert m["theme_color"].lower() == THEME
 
 
 def test_manifest_icons_exist_and_carry_the_right_purposes():
@@ -153,7 +156,7 @@ def test_index_wires_up_the_installable_app():
     html = _read("index.html")
     assert 'rel="manifest" href="manifest.webmanifest"' in html
     assert 'rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png"' in html
-    assert 'name="theme-color" content="#07080a"' in html
+    assert 'name="theme-color" content="%s"' % THEME.upper() in html
     assert 'name="apple-mobile-web-app-capable" content="yes"' in html
     assert 'name="apple-mobile-web-app-status-bar-style"' in html
     # viewport-fit=cover is what makes env(safe-area-inset-*) non-zero on a notched phone

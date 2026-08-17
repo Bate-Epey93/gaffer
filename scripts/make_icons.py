@@ -43,9 +43,11 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 # ---------------------------------------------------------------- constants --
 
-BG_TOP = (13, 16, 21)      # #0d1015 — the dashboard topbar gradient, top
-BG_BOTTOM = (6, 7, 10)     # #06070a — a hair under --bg (#07080a), bottom
-MINT = (62, 224, 184)      # #3ee0b8 — the dashboard accent
+BG_TOP = (55, 0, 60)       # #37003C — FPL's own purple, top of the field
+BG_BOTTOM = (18, 0, 26)    # #12001a — the dashboard background, bottom
+MINT = (0, 255, 135)       # #00FF87 — FPL green, the single accent
+BALL_WHITE = (255, 255, 255)
+BALL_INK = (43, 0, 48)     # the purple field, reused as the ball's panels
 
 SS = 4                     # supersampling factor
 CORNER_RATIO = 0.2237      # Apple's icon corner radius as a fraction of the side
@@ -157,6 +159,83 @@ def _gradient(size: int) -> Image.Image:
     return grad.resize((size, size), Image.BILINEAR)
 
 
+def _pentagon(draw: ImageDraw.ImageDraw, cx: float, cy: float, r: float,
+              rotation: float, fill: Tuple[int, int, int, int]) -> None:
+    import math
+    pts = []
+    for i in range(5):
+        a = rotation + i * (2 * math.pi / 5)
+        pts.append((cx + r * math.sin(a), cy - r * math.cos(a)))
+    draw.polygon(pts, fill=fill)
+
+
+def _ball(d: int) -> Image.Image:
+    """A football, drawn to survive being 16px wide.
+
+    Detail is the enemy here: a faithful 32-panel ball turns to grey mush at
+    favicon size. So it is one central pentagon plus five at the seams, which is
+    the least a shape can carry and still read unmistakably as a football. The
+    panels are the icon's own purple rather than black, so the ball belongs to
+    the mark instead of sitting on top of it.
+    """
+    import math
+    img = Image.new("RGBA", (d, d), (0, 0, 0, 0))
+    dr = ImageDraw.Draw(img)
+    dr.ellipse([0, 0, d - 1, d - 1], fill=BALL_WHITE + (255,))
+
+    cx = cy = (d - 1) / 2.0
+    R = d / 2.0
+    panels = Image.new("RGBA", (d, d), (0, 0, 0, 0))
+    pd = ImageDraw.Draw(panels)
+    _pentagon(pd, cx, cy, R * 0.30, 0.0, BALL_INK + (255,))
+    for i in range(5):
+        a = i * (2 * math.pi / 5) + math.pi / 5
+        px_ = cx + R * 0.74 * math.sin(a)
+        py_ = cy - R * 0.74 * math.cos(a)
+        _pentagon(pd, px_, py_, R * 0.26, a + math.pi, BALL_INK + (255,))
+
+    # Clip the panels to the sphere: the outer five overhang by design, so that
+    # they read as panels running off the edge rather than as floating dots.
+    clip = Image.new("L", (d, d), 0)
+    ImageDraw.Draw(clip).ellipse([0, 0, d - 1, d - 1], fill=255)
+    panels.putalpha(Image.composite(panels.getchannel("A"), Image.new("L", (d, d), 0), clip))
+    img.alpha_composite(panels)
+
+    # A touch of shading so it reads as a sphere, not a sticker.
+    shade = Image.new("L", (d, d), 0)
+    ImageDraw.Draw(shade).ellipse([int(d * 0.10), int(d * 0.10), d - 1, d - 1], fill=70)
+    shade = shade.filter(ImageFilter.GaussianBlur(d * 0.10))
+    shade = Image.composite(shade, Image.new("L", (d, d), 0), clip)
+    img.alpha_composite(Image.merge("RGBA", (
+        Image.new("L", (d, d), BALL_INK[0]),
+        Image.new("L", (d, d), BALL_INK[1]),
+        Image.new("L", (d, d), BALL_INK[2]),
+        shade)))
+    return img
+
+
+def _motion(canvas: Image.Image, bx: float, by: float, d: float) -> None:
+    """Speed lines trailing the ball, tapering as they recede.
+
+    Three strokes, not more: the streaks have to say "moving" at a glance and
+    then get out of the way of the mark. They shorten and fade with distance
+    from the ball, which is what reads as motion rather than as stripes, and
+    they stop short of the ball so it stays a clean circle.
+    """
+    dr = ImageDraw.Draw(canvas)
+    for i, (dy, length, alpha, width) in enumerate((
+        (-0.24, 0.95, 225, 0.16),
+        (0.04, 1.40, 180, 0.14),
+        (0.32, 0.80, 130, 0.12),
+    )):
+        y = by + d * dy
+        x1 = bx - d * 0.62
+        x0 = x1 - d * length
+        w = max(1, int(d * width))
+        dr.rounded_rectangle([x0, y - w / 2.0, x1, y + w / 2.0],
+                             radius=w / 2.0, fill=MINT + (alpha,))
+
+
 def render(size: int, rounded: bool, opaque: bool, mark_ratio: float,
            rim: bool) -> Tuple[Image.Image, str]:
     big = size * SS
@@ -171,20 +250,45 @@ def render(size: int, rounded: bool, opaque: bool, mark_ratio: float,
     # a soft mint bloom behind the mark: keeps a near-black icon from vanishing
     # into a dark wallpaper without adding anything that has to stay legible
     glow = Image.new("L", (big, big), 0)
-    r = int(big * mark_ratio * 0.80)
+    r = int(big * mark_ratio * 0.62)
     ImageDraw.Draw(glow).ellipse(
-        [big // 2 - r, big // 2 - r, big // 2 + r, big // 2 + r], fill=52)
-    glow = glow.filter(ImageFilter.GaussianBlur(big * 0.11))
+        [big // 2 - r, big // 2 - r, big // 2 + r, big // 2 + r], fill=30)
+    glow = glow.filter(ImageFilter.GaussianBlur(big * 0.13))
     field.alpha_composite(Image.merge("RGBA", (
         Image.new("L", (big, big), MINT[0]),
         Image.new("L", (big, big), MINT[1]),
         Image.new("L", (big, big), MINT[2]),
         glow)))
 
-    mask, font_label = _glyph_mask(int(big * mark_ratio))
-    mark = Image.new("RGBA", mask.size, MINT + (0,))
-    mark.putalpha(mask)
-    field.alpha_composite(mark, ((big - mask.width) // 2, (big - mask.height) // 2))
+    # The mark is a lockup: the ``g`` with a football struck away from it, the
+    # streaks trailing back toward the letter. Both are composed on one layer
+    # and centred together, so the pair is optically centred rather than the
+    # letter being centred and the ball hanging off the edge.
+    gh = int(big * mark_ratio * 0.86)
+    mask, font_label = _glyph_mask(gh)
+    ball_d = int(gh * 0.42)
+
+    # The ball flies in a clear band ABOVE the letter, not across it. The first
+    # attempt overlapped the two and ran the speed lines straight through the
+    # bowl, which read as a strikethrough rather than as movement — the streaks
+    # have to travel through empty space to say "motion".
+    band = int(ball_d * 1.05)
+    lock_w = mask.width + int(ball_d * 0.55)
+    lock_h = mask.height + band
+    lock = Image.new("RGBA", (lock_w, lock_h), (0, 0, 0, 0))
+
+    letter = Image.new("RGBA", mask.size, MINT + (0,))
+    letter.putalpha(mask)
+    lock.alpha_composite(letter, (0, lock_h - mask.height))
+
+    # Struck away to the upper right, streaks trailing back over the letter's
+    # shoulder through the empty band.
+    bx = lock_w - ball_d
+    by = 0
+    _motion(lock, bx + ball_d / 2.0, by + ball_d / 2.0, float(ball_d))
+    lock.alpha_composite(_ball(ball_d), (int(bx), int(by)))
+
+    field.alpha_composite(lock, ((big - lock_w) // 2, (big - lock_h) // 2))
 
     if rim:
         inset = int(big * 0.028)
