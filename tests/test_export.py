@@ -278,3 +278,22 @@ def test_the_import_uses_catch_not_a_two_argument_then():
     start = source.index("G.request('/squad?entry_id=")
     block = source[start:start + 3000]
     assert ".catch(function (err)" in block, "the import must handle errors with .catch"
+
+
+def test_the_import_reads_the_id_key_the_server_actually_emits():
+    """Picks carry `player_id`, not `element` or `id`.
+
+    Reading only the latter two filtered all fifteen picks out and reported
+    "got 0 players, expected 15" for a squad that had imported perfectly — a
+    failure that looked like a data problem but was pure key-name drift between
+    the server's serialisation and the front end's reader.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "gaffer", "web", "myteam-view.js"), encoding="utf-8") as fh:
+        source = fh.read()
+    start = source.index("G.request('/squad?entry_id=")
+    block = source[start:start + 2000]
+    assert "p.player_id" in block, "the import must read player_id"
+    # and the diagnostic must name the payload's keys, so the next mismatch is
+    # debuggable from the message alone rather than from a browser console
+    assert "payload keys" in block

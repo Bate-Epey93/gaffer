@@ -58,11 +58,23 @@
         // the usual reason is not an error at all — see below.
         if (res && res.unavailable) throw new Error(res.reason || 'picks are not published yet');
 
-        var picks = (res.squad && res.squad.picks) || res.picks || res.squad || [];
+        /* Every id key this payload has ever used. `player_id` is what the
+           server actually emits; reading only `element`/`id` silently filtered
+           all fifteen picks out and reported "got 0 players" for a squad that
+           had imported perfectly. Falling back to `players[]` covers the shape
+           where picks are absent but the resolved squad is present. */
+        var picks = (res.squad && res.squad.picks) || res.picks ||
+                    (Array.isArray(res.squad) ? res.squad : null) || res.players || [];
         var ids = picks.map(function (p) {
-          return typeof p === 'number' ? p : (p.element || p.id);
+          if (typeof p === 'number') return p;
+          if (!p) return null;
+          return p.player_id || p.element || p.id ||
+                 (p.player && (p.player.id || p.player.player_id)) || null;
         }).filter(Boolean);
-        if (ids.length !== 15) throw new Error('got ' + ids.length + ' players, expected 15');
+        if (ids.length !== 15) {
+          throw new Error('got ' + ids.length + ' players, expected 15' +
+                          ' (payload keys: ' + Object.keys(res || {}).join(', ') + ')');
+        }
         M().setPicks(ids, 'entry');
         U.toast('Loaded your team from FPL.');
         rerender();
