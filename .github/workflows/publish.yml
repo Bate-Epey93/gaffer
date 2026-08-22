@@ -115,6 +115,15 @@ jobs:
           players=$(python -c "import json;print(json.load(open('site/data/manifest.json'))['players_exported'])")
           echo "player breakdowns: $players"
           test "$players" -gt 400
+          # The team import and the H2H report are only built when a team id is
+          # configured, so their absence is a real signal rather than a nicety:
+          # if FPL_ENTRY_ID is set, these files must exist or the site ships
+          # with two empty tabs and nothing says why.
+          if [ -n "${{ vars.FPL_ENTRY_ID }}" ]; then
+            test -f site/data/entry.json
+            test -f site/data/h2h.json
+            python -c "import json; h=json.load(open('site/data/h2h.json')); print('h2h leagues:', len(h.get('leagues') or []), '| note:', h.get('unavailable'))"
+          fi
           du -sh site
 
       - uses: actions/configure-pages@v5
