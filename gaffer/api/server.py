@@ -90,6 +90,7 @@ SHELL_ASSETS: Tuple[str, ...] = (
     "views.js",
     "myteam.js",
     "myteam-view.js",
+    "h2h-view.js",
     "app.js",
     "manifest.webmanifest",
     "icons/icon-180.png",

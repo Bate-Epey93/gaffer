@@ -44,6 +44,7 @@ ASSET_FILES = (
     "views.js",
     "myteam.js",
     "myteam-view.js",
+    "h2h-view.js",
     # index.html loads this for the offline/sample fallback; leaving it out
     # produced a 404 on every page load of the published site.
     "sample.js",
@@ -59,7 +60,7 @@ ASSET_DIRS = ("icons",)
 # no server to do that, and without it a pushed fix can sit invisible behind a
 # stale app.js for as long as the browser feels like caching it.
 STAMPED_ASSETS = ("app.js", "ui.js", "views.js", "myteam.js", "myteam-view.js",
-                  "sample.js", "styles.css")
+                  "h2h-view.js", "sample.js", "styles.css")
 
 
 class ExportError(RuntimeError):
@@ -195,6 +196,9 @@ def export_site(
     os.makedirs(out_dir, exist_ok=True)
     data_dir = os.path.join(out_dir, "data")
 
+    from gaffer.data.loaders import load_game_state
+    _state_for_h2h = load_game_state(config or Config())
+
     app = create_app(config=config, horizon=horizon)
     # Loopback peer plus the shared secret when one is configured: the export
     # runs inside CI where GAFFER_PASSWORD may well be set, and the auth gate
@@ -288,6 +292,31 @@ def export_site(
                 "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             })
         say("  %s" % entry_status)
+
+    # --- head to head -------------------------------------------------------
+    # Needs the opponents' squads, which a browser may not read cross-origin.
+    if entry_id:
+        say("head-to-head ties")
+        try:
+            from gaffer.data.cache import Cache
+            from gaffer.data.fpl_api import FPLClient
+            from gaffer.model.xp import XPEngine
+            from gaffer.optimize import h2h as H
+
+            cfg = config or Config()
+            engine = XPEngine(cfg)
+            engine.fit(_state_for_h2h)
+            names = {p.id: p.web_name for p in _state_for_h2h.players.values()}
+            client_fpl = FPLClient(cfg, Cache(default_ttl=cfg.cache_ttl_seconds))
+            h2h_report = H.build_report(client_fpl, engine, _state_for_h2h,
+                                        int(entry_id), gw, names)
+            written["h2h.json"] = _write_json(
+                os.path.join(data_dir, "h2h.json"), h2h_report)
+            say("  %d league(s)" % len(h2h_report.get("leagues") or []))
+        except Exception as exc:
+            say("  skipped: %s" % exc)
+            written["h2h.json"] = _write_json(os.path.join(data_dir, "h2h.json"),
+                                              {"unavailable": str(exc), "leagues": []})
 
     player_count = 0
     if include_players:

@@ -901,7 +901,7 @@
 
   // -------------------------------------------------------------- router --
 
-  var VIEWS = ['squad', 'players', 'planner', 'captain', 'chips', 'myteam'];
+  var VIEWS = ['squad', 'players', 'planner', 'captain', 'chips', 'myteam', 'h2h'];
 
   function renderView(name, force) {
     if (VIEWS.indexOf(name) < 0) name = 'squad';

@@ -922,3 +922,38 @@ p.warn { color: var(--warn); }
 
 /* The bench is a list, not a formation, so it may wrap freely. */
 .bench .prow { flex-wrap: wrap; justify-content: flex-start; }
+
+/* ------------------------------------------------------------------ H2H ---
+   Win probability, shown as a bar you can read at arm's length. Every segment
+   is labelled as well as coloured: the three outcomes must be distinguishable
+   without relying on hue. */
+.h2h-bar { display: flex; height: 12px; border-radius: 999px; overflow: hidden;
+  background: rgba(255,255,255,.06); margin: .5rem 0 .35rem; }
+.h2h-bar i { display: block; height: 100%; }
+.h2h-bar i.win  { background: var(--accent); }
+.h2h-bar i.draw { background: var(--warn); }
+.h2h-bar i.loss { background: var(--neg); }
+.h2h-key { display: flex; gap: .9rem; font-size: .8rem; font-weight: 600; }
+.h2h-key .win { color: var(--accent); }
+.h2h-key .draw { color: var(--warn); }
+.h2h-key .loss { color: var(--neg); }
+.h2h-vs { margin: 0 0 .25rem; }
+
+.h2h-sides { margin: .6rem 0; }
+.h2h-head, .h2h-side { display: grid; gap: .5rem; align-items: baseline;
+  grid-template-columns: 3.2rem 3rem 2.8rem 4.4rem minmax(0, 1fr); }
+.h2h-head { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--ink-3); padding-bottom: .2rem; }
+.h2h-side { padding: .3rem 0; border-top: 1px solid var(--glass-line); }
+.h2h-who { color: var(--ink-2); }
+.h2h-mean { font-weight: 700; font-variant-numeric: tabular-nums; }
+.h2h-capt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.h2h-advice { margin: .5rem 0 0; font-size: .9rem; }
+.h2h-stale { margin: 0 14px .5rem; font-size: .82rem; }
+
+.h2h-caps { display: flex; flex-direction: column; gap: 2px; }
+.h2h-cap { display: flex; align-items: center; gap: .5rem; padding: .35rem .5rem;
+  border-radius: 8px; background: rgba(255,255,255,.05); }
+.h2h-cap.is-now { outline: 1px solid var(--accent); }
+.h2h-capwin { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; }
+.h2h-swap { margin: .6rem 0 0; font-size: .88rem; color: var(--ink-2); }

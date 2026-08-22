@@ -1262,6 +1262,7 @@
     captain: captainView,
     chips: chipsView,
     myteam: function (host) { return G.myteamView(host); },
+    h2h: function (host) { return G.h2hView(host); },
     drawer: drawerView,
     updateCountdown: updateCountdown
   };

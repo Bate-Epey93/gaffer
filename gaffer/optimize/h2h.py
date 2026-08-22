@@ -185,3 +185,119 @@ def advice(mine_stats: Dict[str, float], theirs_stats: Dict[str, float],
     return ("Within %.1f points of each other, so this is close to a coin flip at "
             "%.0f%%. The armband decides it — take the highest win probability below, "
             "not the highest expected score." % (abs(gap), 100 * win))
+
+
+def find_opponent(matches: Dict[str, Any], entry_id: int, gw: int) -> Optional[Dict[str, Any]]:
+    """Who you face in `gw`, from a league's fixture list.
+
+    An H2H league pairs you with "AVERAGE" when the entrant count is odd; that
+    is a real opponent scoring the league average, but it has no entry id and
+    therefore no squad to model, so it is reported and skipped rather than
+    silently dropped.
+    """
+    for match in matches.get("results") or []:
+        if int(match.get("event") or 0) != int(gw):
+            continue
+        for me, them in ((1, 2), (2, 1)):
+            if match.get("entry_%d_entry" % me) == int(entry_id):
+                return {
+                    "entry": match.get("entry_%d_entry" % them),
+                    "name": match.get("entry_%d_name" % them),
+                    "player": match.get("entry_%d_player_name" % them),
+                    "is_average": match.get("entry_%d_entry" % them) is None,
+                    "is_knockout": bool(match.get("is_knockout")),
+                }
+    return None
+
+
+def build_report(client: Any, engine: Any, state: Any, entry_id: int,
+                 gw: int, names: Dict[int, str]) -> Dict[str, Any]:
+    """Every H2H tie this gameweek, scored on win probability.
+
+    Runs in CI rather than the browser for the same reason the squad import
+    does: reading another manager's picks is a cross-origin request the FPL API
+    refuses, and CI is not a browser.
+    """
+    from datetime import datetime, timezone
+
+    def picks_for(target: int) -> Optional[Tuple[List[int], Optional[int], int]]:
+        for candidate in (gw, gw - 1, gw - 2):
+            if candidate < 1:
+                continue
+            try:
+                payload = client.entry_picks(int(target), candidate)
+            except Exception:
+                continue
+            lineup, captain = lineup_from_picks(payload)
+            if len(lineup) >= 11:
+                return lineup, captain, candidate
+        return None
+
+    report: Dict[str, Any] = {
+        "gw": int(gw), "entry_id": int(entry_id),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "leagues": [], "unavailable": None,
+    }
+
+    mine = picks_for(entry_id)
+    if not mine:
+        report["unavailable"] = ("your GW%d squad is not published yet — FPL "
+                                 "releases picks only after the deadline" % gw)
+        return report
+    my_lineup, my_captain, my_gw = mine
+    my_dist = squad_distribution(engine, gw, my_lineup, captain=my_captain)
+    my_stats = summarise(*my_dist)
+    my_stats["captain"] = names.get(my_captain, "-")
+    my_stats["picks_gw"] = my_gw
+    report["mine"] = my_stats
+
+    try:
+        entry = client.entry(int(entry_id))
+        leagues = (entry.get("leagues") or {}).get("h2h") or []
+    except Exception as exc:
+        report["unavailable"] = "could not read your leagues: %s" % exc
+        return report
+
+    for league in leagues:
+        lid = league.get("id")
+        row: Dict[str, Any] = {"league_id": lid, "name": league.get("name")}
+        try:
+            matches = client.h2h_matches(int(lid), int(entry_id))
+        except Exception as exc:
+            row["error"] = str(exc)
+            report["leagues"].append(row)
+            continue
+
+        opponent = find_opponent(matches, entry_id, gw)
+        if not opponent:
+            row["error"] = "no GW%d fixture in this league" % gw
+            report["leagues"].append(row)
+            continue
+        row["opponent"] = opponent
+        if opponent.get("is_average") or not opponent.get("entry"):
+            row["error"] = ("this week you play the league AVERAGE, which has no "
+                            "squad to model")
+            report["leagues"].append(row)
+            continue
+
+        theirs = picks_for(int(opponent["entry"]))
+        if not theirs:
+            row["error"] = "their squad is not published yet"
+            report["leagues"].append(row)
+            continue
+        their_lineup, their_captain, their_gw = theirs
+        their_dist = squad_distribution(engine, gw, their_lineup, captain=their_captain)
+        their_stats = summarise(*their_dist)
+        their_stats["captain"] = names.get(their_captain, "-")
+        their_stats["picks_gw"] = their_gw
+
+        result = win_probability(my_dist, their_dist)
+        row.update({
+            "theirs": their_stats,
+            "win": result["win"], "draw": result["draw"], "loss": result["loss"],
+            "advice": advice(my_stats, their_stats, result),
+            "captains": captain_options(engine, gw, my_lineup, their_dist, names)[:8],
+            "stale": (my_gw != gw or their_gw != gw),
+        })
+        report["leagues"].append(row)
+    return report

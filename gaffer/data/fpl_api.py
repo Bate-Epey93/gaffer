@@ -150,6 +150,12 @@ class FPLClient:
     def entry(self, entry_id: int) -> Dict[str, Any]:
         return self._get("/entry/%d/" % entry_id, "entry_%d" % entry_id)
 
+    def h2h_matches(self, league_id: int, entry_id: int) -> Dict[str, Any]:
+        """A head-to-head league's fixture list for one entry, all 38 weeks."""
+        return self._get(
+            "/leagues-h2h-matches/league/%d/?page=1&entry=%d" % (league_id, entry_id),
+            "h2h_%d_%d" % (league_id, entry_id))
+
     def entry_history(self, entry_id: int) -> Dict[str, Any]:
         return self._get("/entry/%d/history/" % entry_id, "entry_%d_history" % entry_id)
 
