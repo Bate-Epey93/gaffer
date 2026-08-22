@@ -122,19 +122,29 @@ def test_prices_are_stored_in_tenths_of_a_million(game_state):
 # ---------------------------------------------------------------------------
 
 
-def test_the_season_has_not_started(game_state):
+def test_the_season_state_is_coherent(game_state):
+    """Season-agnostic. This used to assert the season had NOT started, which
+    was true the day it was written and false a week later — a test that
+    expires on a date is a test that fails on a date."""
     assert game_state.season == "2026-27"
-    assert game_state.current_gw == 1
-    assert game_state.finished_gws == []
-    assert game_state.elements_are_prior_season is True
+    assert 1 <= game_state.current_gw <= 38
     assert len(game_state.events) == 38
+    # Finished gameweeks are exactly the ones before the current one, and every
+    # one of them is a real gameweek.
+    assert all(1 <= g < game_state.current_gw + 1 for g in game_state.finished_gws)
+    assert game_state.finished_gws == sorted(set(game_state.finished_gws))
 
 
-def test_bootstrap_element_totals_carry_last_season(game_state):
-    """Pre-season the API's element rows are LAST season's totals, not zeros."""
+def test_bootstrap_element_totals_are_a_real_season(game_state):
+    """The element rows carry SOME season's totals, never all zeros.
+
+    Pre-season they are last season's (a full campaign, 2000+ minutes); once
+    play starts they are this season's and begin near zero. Both are correct,
+    so the invariant is that somebody has played, not how much."""
     minutes = [p.minutes for p in game_state.players.values()]
-    assert max(minutes) > 2000, "no player has prior-season minutes"
-    assert game_state.elements_are_prior_season is True
+    assert max(minutes) > 0, "no player has any minutes at all"
+    if game_state.elements_are_prior_season:
+        assert max(minutes) > 2000, "prior-season totals should be a full season"
 
 
 def test_exactly_three_promoted_clubs_are_detected(game_state):
@@ -155,8 +165,9 @@ def test_gameweek_deadlines_are_in_order_and_gw1_is_the_known_one(game_state):
     assert deadlines[0].startswith("2026-08-21T17:30")
 
 
-def test_gws_remaining_covers_the_whole_season_pre_season(game_state):
-    assert game_state.gws_remaining() == list(range(1, 39))
+def test_gws_remaining_runs_from_the_current_gameweek_to_38(game_state):
+    remaining = game_state.gws_remaining()
+    assert remaining == list(range(game_state.current_gw, 39))
 
 
 # ---------------------------------------------------------------------------
@@ -282,13 +293,17 @@ def test_players_df_team_labels_match_the_team_table(game_state):
 # ---------------------------------------------------------------------------
 
 
-def test_current_season_history_is_empty_but_correctly_shaped(game_state):
-    """Pre-season nobody has played; ``df["minutes"].sum()`` must still work."""
+def test_current_season_history_is_correctly_shaped(game_state):
+    """Whether or not anyone has played, the frame must be usable.
+
+    The original asserted the history was EMPTY, which stopped being true the
+    moment GW1 was played. What actually matters is that the columns exist and
+    the aggregations work on an empty frame as well as a full one."""
     for pid in sorted(game_state.players)[:20]:
         df = game_state.history(pid)
-        assert len(df) == 0
         assert "minutes" in df.columns
-        assert df["minutes"].sum() == 0
+        assert df["minutes"].sum() >= 0
+        assert len(df) <= 38
 
 
 def test_history_of_an_unknown_player_is_an_empty_frame(game_state):
@@ -340,7 +355,7 @@ def test_summary_reports_the_headline_numbers(game_state):
     assert "20 teams" in summary
     assert re.search(r"\b[5-7]\d\d players\b", summary), summary
     assert "380 fixtures" in summary
-    assert "current_gw=1" in summary
+    assert re.search(r"current_gw=([1-9]|[12]\d|3[0-8])\b", summary), summary
 
 
 # ---------------------------------------------------------------------------

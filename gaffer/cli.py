@@ -1039,6 +1039,116 @@ def cmd_serve(args: argparse.Namespace, ctx: Context) -> int:
     return EXIT_OK
 
 
+def cmd_h2h(args: argparse.Namespace, ctx: Context) -> int:
+    """Score a head-to-head tie on win probability, not expected points."""
+    from gaffer.optimize import h2h as H
+
+    state = ctx.load()
+    gw = int(args.gw) if args.gw else state.current_gw
+    engine = ctx.fit()
+    ctx.project([gw], allow_cache=not args.fresh)
+
+    my_id = args.entry or ctx.config.entry_id
+    if not my_id:
+        print("no entry id: pass --entry or set FPL_ENTRY_ID")
+        return EXIT_FAIL
+
+    client = FPLClient(ctx.config, Cache(default_ttl=ctx.config.cache_ttl_seconds))
+    stale_note: List[str] = []
+    names = {p.id: p.web_name for p in state.players.values()}
+
+    def load(entry_id: int, label: str):
+        """Their XI for `gw`, falling back to the last one FPL published.
+
+        This fallback is what makes the command usable at all. Squads go public
+        only at the deadline, which is the moment the decision is already made —
+        so before a deadline the only estimate of an opponent's XI is the last
+        one they showed, and using it beats refusing to answer.
+        """
+        payload = None
+        used_gw = gw
+        for candidate in (gw, gw - 1, gw - 2):
+            if candidate < 1:
+                continue
+            try:
+                payload = client.entry_picks(int(entry_id), candidate)
+                used_gw = candidate
+                break
+            except FPLNotFound:
+                continue
+            except FPLError as exc:
+                print("%s (%s): FPL API error: %s" % (label, entry_id, exc))
+                return None
+        if payload is None:
+            print("%s (%s): no published picks at GW%d or earlier."
+                  % (label, entry_id, gw))
+            return None
+        if used_gw != gw:
+            stale_note.append("%s: GW%d picks are not public yet, so this uses "
+                              "their GW%d squad as the estimate."
+                              % (label, gw, used_gw))
+        lineup, captain = H.lineup_from_picks(payload)
+        if len(lineup) < 11:
+            print("%s (%s): only %d starters found" % (label, entry_id, len(lineup)))
+            return None
+        return lineup, captain
+
+    mine = load(my_id, "your team")
+    theirs = load(args.opponent, "opponent")
+    if not mine or not theirs:
+        return EXIT_FAIL
+
+    my_dist = H.squad_distribution(engine, gw, mine[0], captain=mine[1])
+    their_dist = H.squad_distribution(engine, gw, theirs[0], captain=theirs[1])
+    my_stats = H.summarise(*my_dist)
+    their_stats = H.summarise(*their_dist)
+    result = H.win_probability(my_dist, their_dist)
+
+    print(heading("head to head — GW%d" % gw))
+    for note in stale_note:
+        print("  ! %s" % note)
+    print(render_table(
+        ["side", "mean", "sd", "10th", "median", "90th", "captain"],
+        [["you (%s)" % my_id, f2(my_stats["mean"], "%.1f"), f2(my_stats["sd"], "%.1f"),
+          my_stats["p10"], my_stats["median"], my_stats["p90"],
+          names.get(mine[1], "-")],
+         ["them (%s)" % args.opponent, f2(their_stats["mean"], "%.1f"),
+          f2(their_stats["sd"], "%.1f"), their_stats["p10"], their_stats["median"],
+          their_stats["p90"], names.get(theirs[1], "-")]],
+        align="lrrrrrl"))
+
+    print("\n" + render_table(
+        ["outcome", "probability"],
+        [["win", pct(result["win"])], ["draw", pct(result["draw"])],
+         ["loss", pct(result["loss"])]],
+        align="lr"))
+
+    print("\n" + textwrap.fill(H.advice(my_stats, their_stats, result), 78))
+
+    options = H.captain_options(engine, gw, mine[0], their_dist, names)
+    if options:
+        print(heading("armband, ranked by win probability"))
+        rows = []
+        for i, o in enumerate(options[:8], 1):
+            rows.append([i, trunc(o["name"], 16), f2(o["mean"], "%.1f"),
+                         f2(o["sd"], "%.1f"), o["p90"], pct(o["win"]),
+                         pct(o["score"])])
+        print(render_table(
+            ["#", "captain", "mean", "sd", "90th", "P(win)", "win+½draw"],
+            rows, align="rlrrrrr"))
+        best, current = options[0], None
+        for o in options:
+            if o["player_id"] == mine[1]:
+                current = o
+        if current and best["player_id"] != current["player_id"]:
+            print("\n%s over %s is worth %+.1f points of win probability this week, "
+                  "even though it costs %+.2f expected points."
+                  % (best["name"], current["name"],
+                     100 * (best["score"] - current["score"]),
+                     best["mean"] - current["mean"]))
+    return EXIT_OK
+
+
 def cmd_export(args: argparse.Namespace, ctx: Context) -> int:
     """Freeze the dashboard to disk for a static host."""
     from gaffer.ops.export import ExportError, export_site, format_summary
@@ -1348,6 +1458,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level", default="info",
                    choices=["critical", "error", "warning", "info", "debug"])
     p.set_defaults(func=cmd_serve)
+
+    p = add("h2h", "win the head-to-head, not the week",
+            "Score a head-to-head tie on P(beating your opponent) rather than on "
+            "expected points. Those differ: as an underdog you want variance, as a "
+            "favourite you want none, and an expected-points optimiser plays both "
+            "the same way.")
+    p.add_argument("--opponent", type=int, required=True, help="their FPL entry id")
+    p.add_argument("--entry", type=int, help="your entry id (default: FPL_ENTRY_ID)")
+    p.add_argument("--gw", type=int, help="gameweek (default: current)")
+    p.add_argument("--fresh", action="store_true", help="recompute projections")
+    p.set_defaults(func=cmd_h2h)
 
     p = add("export", "freeze the dashboard into static files",
             "Compute everything once and write the whole dashboard to a directory "

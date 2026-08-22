@@ -540,7 +540,18 @@ def load_game_state(
 
     finished_gws = sorted(int(e["id"]) for e in events if e.get("finished"))
     current_gw = resolve_current_gw(events)
-    elements_are_prior_season = not finished_gws
+    # NOT simply `not finished_gws`. A gameweek is "finished" only once the API
+    # says so, which lags the football by hours — but the element rows flip to
+    # this season's totals as soon as the first match is played. Between those
+    # two moments the old rule claimed a full prior season while the data held
+    # 90 minutes, and anything treating those totals as a season's evidence
+    # (per-90 rates, form baselines) would have read them off by a factor of 30.
+    #
+    # So test the property directly: prior-season rows describe a whole
+    # campaign, and somebody in the league will have played most of it.
+    _max_minutes = max((int(e.get("minutes") or 0) for e in bootstrap["elements"]),
+                       default=0)
+    elements_are_prior_season = (not finished_gws) and _max_minutes > 1500
 
     player_history: Dict[int, pd.DataFrame] = {}
     player_history_past: Dict[int, List[Dict[str, Any]]] = {}
